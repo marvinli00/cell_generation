@@ -5,3 +5,4 @@ thrombin/
 structures/
 wandb/
 two_labels_latent_diffusion_edm_silu/
+two_labels_latent_diffusion_edm_silu_less_cross_attn/
