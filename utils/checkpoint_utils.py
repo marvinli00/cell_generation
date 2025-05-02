@@ -23,13 +23,7 @@ def setup_checkpoint_hooks(accelerator, args, ema_model=None):
             # Save EMA model if used
             if args.use_ema and ema_model is not None:
                 ema_model.save_pretrained(os.path.join(output_dir, "unet_ema"))
-
-            if args.use_ema:
-                try:
-                    ema_model = accelerator.ema_model
-                    ema_model.save_pretrained(os.path.join(output_dir, "unet_ema"))
-                except:
-                    print("No EMA model found")
+                
             # Save each model
             for i, model in enumerate(models):
                 model.save_pretrained(os.path.join(output_dir, "unet"))

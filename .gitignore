@@ -3,3 +3,5 @@ __pycache__/
 two_labels_latent_diffusion_edm/
 thrombin/
 structures/
+wandb/
+two_labels_latent_diffusion_edm_silu/

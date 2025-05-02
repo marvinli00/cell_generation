@@ -2,6 +2,84 @@ import torch
 import torch.nn as nn
 from diffusers import UNet2DConditionModel
 
+
+from diffusers import UNet2DConditionModel
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from diffusers.configuration_utils import register_to_config
+class CustomUNetWithEmbeddings(UNet2DConditionModel):
+    @register_to_config
+    def __init__(
+        self,
+        sample_size=32,
+        in_channels=32,
+        out_channels=32,
+        layers_per_block=2,
+        block_out_channels=(256, 512, 512),
+        down_block_types=("CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "AttnDownBlock2D"),
+        up_block_types=("CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "AttnUpBlock2D"),
+        cross_attention_dim=768,
+        mid_block_type="UNetMidBlock2DCrossAttn",
+        class_embed_type="projection",
+        projection_class_embeddings_input_dim=512,
+        # Custom parameters
+        protein_embedding_dim=384,
+        cell_embedding_dim=128,
+        num_protein_embeddings=13349,  # 13348 + 1
+        num_cell_embeddings=41,        # 40 + 1
+        **kwargs
+    ):
+        super().__init__(
+                    sample_size=sample_size,
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    layers_per_block=layers_per_block,
+                    block_out_channels=block_out_channels,
+                    down_block_types=down_block_types,
+                    up_block_types=up_block_types,
+                    cross_attention_dim=cross_attention_dim,
+                    mid_block_type=mid_block_type,
+                    class_embed_type=class_embed_type,
+                    projection_class_embeddings_input_dim=projection_class_embeddings_input_dim,
+                    **kwargs
+                )
+        # Define embeddings within the model
+        self.embedding_protein = nn.Embedding(num_protein_embeddings, protein_embedding_dim, padding_idx=0)
+        self.embedding_cell_label = nn.Embedding(num_cell_embeddings, cell_embedding_dim, padding_idx=0)
+
+    def forward(
+        self,
+        sample: torch.FloatTensor,
+        timestep: torch.Tensor,
+        protein_labels: torch.Tensor = None, # Accept the specific labels
+        cell_line_labels: torch.Tensor = None, # Accept the specific labels
+        encoder_hidden_states: torch.Tensor = None,
+        class_labels: torch.Tensor = None, # Keep standard arg, but we'll compute it
+        **kwargs # Pass other args through
+    ):
+        # --- Compute combined embedding internally ---
+        computed_class_labels = None
+        if protein_labels is not None and cell_line_labels is not None:
+            protein_embed = self.embedding_protein(protein_labels)
+            cell_embed = self.embedding_cell_label(cell_line_labels)
+            combined_embed = torch.cat([protein_embed, cell_embed], dim=2)
+            computed_class_labels = F.silu(combined_embed)
+            computed_class_labels = computed_class_labels.squeeze()
+        # If user explicitly passed class_labels, maybe prioritize it? Or raise error?
+        # Here, we prioritize the computed one if labels were given.
+        final_class_labels = computed_class_labels if computed_class_labels is not None else class_labels
+
+        # --- Call the original UNet2DConditionModel forward ---
+        # Pass the computed embedding as 'class_labels'
+        return super().forward(
+            sample=sample,
+            timestep=timestep,
+            encoder_hidden_states=encoder_hidden_states,
+            class_labels=final_class_labels, # Use the computed embedding
+            **kwargs # Pass through any other args
+        )
+
 def create_unet_model(config=None, resolution=32):
     """
     Create a UNet model for conditional diffusion.
@@ -14,61 +92,35 @@ def create_unet_model(config=None, resolution=32):
         UNet2DConditionModel: The configured UNet model.
     """
     if config is None:
-        # # Create a default UNet configuration
-        # model = UNet2DConditionModel(
-        #     sample_size=32,
-        #     in_channels=32,          # Total channels for combined input (gt + cond)
-        #     out_channels=32,         # Output channels should match input dimension
-        #     layers_per_block=2,
-        #     block_out_channels=(256, 512, 512),
-        #     down_block_types=(
-        #         "CrossAttnDownBlock2D",
-        #         "CrossAttnDownBlock2D",
-        #         "AttnDownBlock2D",
-        #     ),
-        #     up_block_types=(
-        #         "CrossAttnUpBlock2D",
-        #         "CrossAttnUpBlock2D",
-        #         "AttnUpBlock2D",
-        #     ),
-        #     cross_attention_dim = 768,
-        #     mid_block_type="UNetMidBlock2DCrossAttn",
-        #     # Add parameters for conditioning
-        #     class_embed_type="simple_projection",
-        #     projection_class_embeddings_input_dim=13348 + 40,  # Combined protein and cell line dimensions
-        # )
-        model = UNet2DConditionModel(
-            sample_size=32,
-            in_channels=32,          # Total channels for combined input (gt + cond)
-            out_channels=32,         # Output channels should match input dimension
-            layers_per_block=2,
-            block_out_channels=(256, 512, 512),
-            down_block_types=(
-                "CrossAttnDownBlock2D",
-                "CrossAttnDownBlock2D",
-                "AttnDownBlock2D",
-            ),
-            up_block_types=(
-                "CrossAttnUpBlock2D",
-                "CrossAttnUpBlock2D",
-                "AttnUpBlock2D",
-            ),
-            cross_attention_dim = 768,
-            
-            mid_block_type="UNetMidBlock2DCrossAttn",
-            # Add parameters for conditioning
-            class_embed_type="timestep",
-            time_embedding_dim = 512,
-            #num_class_embeds = 13348 + 40,
-            #projection_class_embeddings_input_dim=13348 + 40,  # Combined protein and cell line dimensions
-        )
+        model = CustomUNetWithEmbeddings(
+                sample_size=32,
+                in_channels=32,          # Total channels for combined input (gt + cond)
+                out_channels=32,         # Output channels should match input dimension
+                layers_per_block=2,
+                block_out_channels=(256, 512, 512),
+                down_block_types=(
+                    "CrossAttnDownBlock2D",
+                    "CrossAttnDownBlock2D",
+                    "AttnDownBlock2D",
+                ),
+                up_block_types=(
+                    "CrossAttnUpBlock2D",
+                    "CrossAttnUpBlock2D",
+                    "AttnUpBlock2D",
+                ),
+                cross_attention_dim = 768,
+                
+                mid_block_type="UNetMidBlock2DCrossAttn",
+                # Add parameters for conditioning
+                class_embed_type="projection",
+                projection_class_embeddings_input_dim = 512,
+            )
 
-        model.embedding_protein = nn.Embedding(13348,384)
-        model.embedding_cell_label = nn.Embedding(40, 128)
     else:
+        print("no model")
         # Load configuration from file
-        config = UNet2DConditionModel.load_config(config)
-        model = UNet2DConditionModel.from_config(config)
+        # config = UNet2DConditionModel.load_config(config)
+        # model = UNet2DConditionModel.from_config(config)
     
     return model
 

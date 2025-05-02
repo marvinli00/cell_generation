@@ -157,15 +157,20 @@ def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dro
     dropout_mask = torch.rand(protein_label.shape, dtype=weight_dtype, device=clean_images.device) > dropout_prob
     
     # Create one-hot encodings
-    label_onehot = F.one_hot(protein_label, num_classes=13348).to(weight_dtype)
-    cell_line_onehot = F.one_hot(cell_line, num_classes=40).to(weight_dtype)
+    # label_onehot = F.one_hot(protein_label, num_classes=13348).to(weight_dtype)
+    # cell_line_onehot = F.one_hot(cell_line, num_classes=40).to(weight_dtype)
     
-    # Apply dropout
-    label_onehot = label_onehot * dropout_mask.reshape(-1, 1)
-    cell_line_onehot = cell_line_onehot * dropout_mask.reshape(-1, 1)
+    # # Apply dropout
+    # label_onehot = label_onehot * dropout_mask.reshape(-1, 1)
+    # cell_line_onehot = cell_line_onehot * dropout_mask.reshape(-1, 1)
     
     # Concatenate labels
-    total_label = (label_onehot, cell_line_onehot)#torch.cat([label_onehot, cell_line_onehot], dim=1)
+    protein_label = protein_label.reshape(-1,1) * dropout_mask.reshape(-1, 1)
+    cell_line = cell_line.reshape(-1,1) * dropout_mask.reshape(-1, 1)
+
+    protein_label = protein_label.long()
+    cell_line = cell_line.long()
+    total_label = (protein_label, cell_line)#torch.cat([label_onehot, cell_line_onehot], dim=1)
     
     if encoder_hidden_states is not None:
         # Concatenate encoder hidden states if provided

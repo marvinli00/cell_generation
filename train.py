@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 # Import project modules
 from config.default_config import parse_args, EDM_CONFIG
 from data.dataset import FullFieldDataset
-from models.unet import create_unet_model, setup_model_devices, load_vae, load_classifier, load_clip_model
+from models.unet import create_unet_model, setup_model_devices, load_vae, load_classifier, load_clip_model, CustomUNetWithEmbeddings
 from schedulers.edm_scheduler import create_edm_scheduler, prepare_input_with_noise, calculate_edm_loss
 from utils.logging_utils import setup_logging, configure_diffusers_logging, log_training_parameters
 from utils.checkpoint_utils import setup_checkpoint_hooks, save_checkpoint, cleanup_checkpoints, resume_from_checkpoint
@@ -64,9 +64,7 @@ def main():
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
         import wandb
     
-    # Setup checkpoint hooks for accelerator
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-        accelerator = setup_checkpoint_hooks(accelerator, args)
+
     
     # Configure logging
     logger.info(accelerator.state, main_process_only=False)
@@ -102,7 +100,11 @@ def main():
             model_cls=type(model),
             model_config=model.config,
         )
-    
+        # Setup checkpoint hooks for accelerator
+    else:
+        ema_model = None
+    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+        accelerator = setup_checkpoint_hooks(accelerator, args, ema_model)
     # Setup xformers if requested
     if args.enable_xformers_memory_efficient_attention:
         try:
@@ -203,9 +205,6 @@ def main():
     # Resume from checkpoint if requested
     global_step, first_epoch, resume_step = resume_from_checkpoint(accelerator, args)
     
-    if args.use_ema:
-        ema_model = accelerator.ema_model
-    
     # Training loop
     for epoch in range(first_epoch, args.num_epochs):
         model.train()
@@ -269,21 +268,22 @@ def main():
                 # Model prediction (pass sigma directly instead of timestep indices)
                 # Add noise according to EDM formulation
                 
-                protein_label_embedding = model.embedding_protein(protein_label)
-                cellline_label_embedding = model.embedding_cell_label(cellline_label)
-                total_label = torch.cat([protein_label_embedding, cellline_label_embedding], dim=1)
-                #silu activation
-                total_label = F.silu(total_label)
+                # protein_label_embedding = model.module.embedding_protein(protein_label)
+                # cellline_label_embedding = model.module.embedding_cell_label(cellline_label)
+                # total_label = torch.cat([protein_label_embedding, cellline_label_embedding], dim=1)
+                # #silu activation
+                # total_label = F.silu(total_label)
                 
                 model_input, timestep_input = edm_clean_image_to_model_input(x_noisy, sigmas)
                 timestep_input = timestep_input.squeeze()
-                
                 
                 # Get model output
                 model_output = model(
                     model_input, 
                     timestep_input,
-                    class_labels=total_label,
+                    protein_labels = protein_label,
+                    cell_line_labels = cellline_label,
+                    #class_labels=total_label,
                     encoder_hidden_states=encoder_hidden_states,
                 ).sample
                 
@@ -296,7 +296,10 @@ def main():
                 # Calculate EDM loss
                 weights = edm_loss_weight(sigmas)
                 loss = weights*((x_0_hat.float() - target.float()) ** 2)
-                loss = loss.mean()
+
+                loss = loss
+                loss_gt = loss[:,:16]
+                loss = loss.mean() + loss_gt.mean()
 
                 # Optional location loss using classifier
                 if False:  # Set to True to enable location loss
