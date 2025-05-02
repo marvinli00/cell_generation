@@ -232,7 +232,7 @@ def main():
                 clip_images = batch["clip_image"].to(weight_dtype)
                 encoder_hidden_states = clip_model(clip_images)
                 # Prepare model inputs (combined latents and labels)
-                clean_images, total_label, encoder_hidden_states, dropout_mask = prepare_model_inputs(
+                clean_images, (protein_label, cellline_label), encoder_hidden_states, dropout_mask = prepare_model_inputs(
                     gt_images_latent, 
                     cond_images_latent, 
                     batch["cell_line"], 
@@ -260,8 +260,6 @@ def main():
             #P_mean = -1.2
             #sigmas = ((noise * P_std + P_mean).exp()).reshape(-1, 1, 1, 1).to(weight_dtype)
 
-
-
             x_noisy = noise * sigmas + clean_images
 
 
@@ -270,6 +268,13 @@ def main():
             with accelerator.accumulate(model):
                 # Model prediction (pass sigma directly instead of timestep indices)
                 # Add noise according to EDM formulation
+                
+                protein_label_embedding = model.embedding_protein(protein_label)
+                cellline_label_embedding = model.embedding_cell_label(cellline_label)
+                total_label = torch.cat([protein_label_embedding, cellline_label_embedding], dim=1)
+                #silu activation
+                total_label = F.silu(total_label)
+                
                 model_input, timestep_input = edm_clean_image_to_model_input(x_noisy, sigmas)
                 timestep_input = timestep_input.squeeze()
                 

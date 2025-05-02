@@ -165,7 +165,7 @@ def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dro
     cell_line_onehot = cell_line_onehot * dropout_mask.reshape(-1, 1)
     
     # Concatenate labels
-    total_label = torch.cat([label_onehot, cell_line_onehot], dim=1)
+    total_label = (label_onehot, cell_line_onehot)#torch.cat([label_onehot, cell_line_onehot], dim=1)
     
     if encoder_hidden_states is not None:
         # Concatenate encoder hidden states if provided

@@ -14,7 +14,29 @@ def create_unet_model(config=None, resolution=32):
         UNet2DConditionModel: The configured UNet model.
     """
     if config is None:
-        # Create a default UNet configuration
+        # # Create a default UNet configuration
+        # model = UNet2DConditionModel(
+        #     sample_size=32,
+        #     in_channels=32,          # Total channels for combined input (gt + cond)
+        #     out_channels=32,         # Output channels should match input dimension
+        #     layers_per_block=2,
+        #     block_out_channels=(256, 512, 512),
+        #     down_block_types=(
+        #         "CrossAttnDownBlock2D",
+        #         "CrossAttnDownBlock2D",
+        #         "AttnDownBlock2D",
+        #     ),
+        #     up_block_types=(
+        #         "CrossAttnUpBlock2D",
+        #         "CrossAttnUpBlock2D",
+        #         "AttnUpBlock2D",
+        #     ),
+        #     cross_attention_dim = 768,
+        #     mid_block_type="UNetMidBlock2DCrossAttn",
+        #     # Add parameters for conditioning
+        #     class_embed_type="simple_projection",
+        #     projection_class_embeddings_input_dim=13348 + 40,  # Combined protein and cell line dimensions
+        # )
         model = UNet2DConditionModel(
             sample_size=32,
             in_channels=32,          # Total channels for combined input (gt + cond)
@@ -32,11 +54,17 @@ def create_unet_model(config=None, resolution=32):
                 "AttnUpBlock2D",
             ),
             cross_attention_dim = 768,
+            
             mid_block_type="UNetMidBlock2DCrossAttn",
             # Add parameters for conditioning
-            class_embed_type="simple_projection",
-            projection_class_embeddings_input_dim=13348 + 40,  # Combined protein and cell line dimensions
+            class_embed_type="timestep",
+            timestep_input_dim = 512,
+            #num_class_embeds = 13348 + 40,
+            #projection_class_embeddings_input_dim=13348 + 40,  # Combined protein and cell line dimensions
         )
+
+        model.embedding_protein = nn.Embedding(13348,384)
+        model.embedding_cell_label = nn.Embedding(40, 128)
     else:
         # Load configuration from file
         config = UNet2DConditionModel.load_config(config)
