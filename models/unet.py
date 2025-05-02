@@ -58,7 +58,7 @@ def create_unet_model(config=None, resolution=32):
             mid_block_type="UNetMidBlock2DCrossAttn",
             # Add parameters for conditioning
             class_embed_type="timestep",
-            timestep_input_dim = 512,
+            time_embedding_dim = 512,
             #num_class_embeds = 13348 + 40,
             #projection_class_embeddings_input_dim=13348 + 40,  # Combined protein and cell line dimensions
         )
