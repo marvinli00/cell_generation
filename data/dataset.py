@@ -71,7 +71,7 @@ class RandomVerticalFlip(nn.Module):
 class FullFieldDataset(Dataset):
     def __init__(self, data_root = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/", data_len=-1, image_size=[256, 256],
                  label_dict = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/antibody_map.pkl",
-                 annotation_dict = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/annotation_map.pkl"):
+                 annotation_dict = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/annotation_map.pkl",is_train=True):
         flist = make_dataset(data_root)
         if data_len > 0:
             idx = np.random.choice(len(flist), data_len, replace=False)
@@ -83,8 +83,11 @@ class FullFieldDataset(Dataset):
             RandomHorizontalFlip(p=0.25),
             RandomVerticalFlip(p=0.25),
         ])
+        self.tfs_no_flip = transforms.Compose([
+            torch.from_numpy,
+        ])
         # self.test_data = pd.read_csv("/scratch/groups/emmalu/Beacons/test_set.csv", header=None)
-
+        self.is_train = is_train
         self.img_shape = image_size
         self.data_root = data_root
         #_, preprocess = open_clip.create_model_from_pretrained('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224')
@@ -120,7 +123,10 @@ class FullFieldDataset(Dataset):
         img *= 2
         img -= 1
 
-        img = self.tfs(img)
+        if self.is_train:
+            img = self.tfs(img)
+        else:
+            img = self.tfs_no_flip(img)
         img_clip = (img[:, :, [0, 2, 3]]+1)/2
         img_clip = self.clip_image_preprocess(img_clip.permute(2, 0, 1))
         #crop to 224*224

@@ -63,9 +63,15 @@ class CustomUNetWithEmbeddings(UNet2DConditionModel):
         if protein_labels is not None and cell_line_labels is not None:
             protein_embed = self.embedding_protein(protein_labels)
             cell_embed = self.embedding_cell_label(cell_line_labels)
-            combined_embed = torch.cat([protein_embed, cell_embed], dim=2)
+            protein_embed = protein_embed.squeeze()
+            cell_embed = cell_embed.squeeze()
+            if len(protein_embed.shape) == 1:
+                protein_embed = protein_embed.unsqueeze(0)
+            if len(cell_embed.shape) == 1:
+                cell_embed = cell_embed.unsqueeze(0)
+            combined_embed = torch.cat([protein_embed, cell_embed], dim=1)
             computed_class_labels = F.silu(combined_embed)
-            computed_class_labels = computed_class_labels.squeeze()
+            
         # If user explicitly passed class_labels, maybe prioritize it? Or raise error?
         # Here, we prioritize the computed one if labels were given.
         final_class_labels = computed_class_labels if computed_class_labels is not None else class_labels

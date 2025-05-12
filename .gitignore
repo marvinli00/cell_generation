@@ -6,3 +6,6 @@ structures/
 wandb/
 two_labels_latent_diffusion_edm_silu/
 two_labels_latent_diffusion_edm_silu_less_cross_attn/
+generated_images/
+generated_images_1/
+generated_images.zip
