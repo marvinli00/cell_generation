@@ -358,13 +358,19 @@ def sample_edm(
     s_tmax=float("inf"),
     s_noise=1.0,
     device = None,
-    weight_dtype = None
+    weight_dtype = None,
+    classifier = None,
+    vae = None,
+    cell_subcelluar_location = None,
 ):      
     wandb.init(project="Twisted Diffusion", name="Twisted Diffusion")
     batch_size = number_of_particles
     protein_labels = protein_labels.repeat(batch_size, 1)
     cell_line_labels = cell_line_labels.repeat(batch_size, 1)
     encoder_hidden_states = encoder_hidden_states.repeat(batch_size, 1, 1)
+    
+    if classifier is not None:
+        cell_subcelluar_location = cell_subcelluar_location.repeat(batch_size, 1).to(weight_dtype)
     
     # Create random noise for the ground truth part
     latent_channels = 32
@@ -430,7 +436,7 @@ def sample_edm(
         latents.requires_grad = True
         # Combine latents with condition latent
         combined_latent = latents
-        #wandb.log({"latents": latents.max()}, step=i)
+        wandb.log({"latents": latents.max()}, step=i)
         # Prepare input with noise according to EDM formulation
         model_input, timestep_input = edm_clean_image_to_model_input(combined_latent, sigma_hat_view)
         timestep_input = timestep_input.squeeze()
@@ -461,12 +467,27 @@ def sample_edm(
         step_sigma = sigma - sigma_next
         step_sigma = step_sigma.to(device)
         
+        if classifier is not None:
+            untwisted_predicted_x_start = untwisted_predicted_x_start.to(weight_dtype)
+            predicted_class = classifier(untwisted_predicted_x_start*4/vae.scaling_factor)
+            probs = torch.sigmoid(predicted_class)
+            eps = 1e-5
+            log_prob_classifier = torch.log(probs + eps) * cell_subcelluar_location + torch.log(1 - probs + eps) * (1 - cell_subcelluar_location)
+            log_prob_classifier = log_prob_classifier.sum(dim = 1)
+            most_likely_index = torch.argmax(log_prob_classifier, dim=0)
+            wandb.log({"log_prob_classifier": log_prob_classifier.mean()}, step=i)
+            wandb.log({"most_likely_index": most_likely_index}, step=i)
+
+            
+            
         
         #compute log p(y|x_t, t) := log N(y; x_0, sigma_t^2 I)
         log_prob, most_likely_index = twisting_mse(untwisted_predicted_x_start, twisting_target, step_sigma, number_of_particles, step = i)
         log_prob = log_prob.squeeze()
         
-
+        log_prob_classifier = log_prob_classifier.squeeze()
+        log_prob = log_prob + log_prob_classifier
+        
         grad_pk_with_respect_to_x_t = torch.autograd.grad(log_prob.mean(), combined_latent)[0]
         #rescale mean back to the original scale
         grad_pk_with_respect_to_x_t = grad_pk_with_respect_to_x_t*combined_latent.shape[0]
@@ -530,7 +551,7 @@ def sample_edm(
             log_w_accumulated = log_w + log_w_prev_accumulated
                 
             ess =  compute_ess_from_log_w(log_w_accumulated)
-            #wandb.log({"ess": ess}, step=i)
+            wandb.log({"ess": ess}, step=i)
             # ess = self.compute_ess(log_w_accumulated)
             ess_tracker.append(ess.detach().cpu().numpy())
             #self.run.log({"ess": ess})
@@ -579,6 +600,9 @@ for batch in tqdm(test_dataloader):
     # Prepare cell_line and label conditioning
     cell_line = batch["cell_line"].to(device).long()
     protein_label = batch["label"].to(device).long()
+    
+    cell_subcelluar_location = batch["annotation"].to(device).long()
+    
     #one hot encoding
     #cell_line = torch.nn.functional.one_hot(cell_line, num_classes=40)
     #label = torch.nn.functional.one_hot(label, num_classes=13348)
@@ -601,7 +625,7 @@ for batch in tqdm(test_dataloader):
         model=model,
         scheduler=scheduler,
         batch_size=1,
-        number_of_particles=64,
+        number_of_particles=16,
         twisting_target = twisting_target,
         image_size=32,
         num_inference_steps=num_inference_steps,
@@ -615,7 +639,10 @@ for batch in tqdm(test_dataloader):
         output_type="latent",
         s_churn = 0,
         device = device,
-        weight_dtype = weight_dtype
+        weight_dtype = weight_dtype,
+        classifier = classifier,
+        vae = vae,
+        cell_subcelluar_location = cell_subcelluar_location
     )
     with torch.no_grad():
         # Decode the latents to images
@@ -641,4 +668,5 @@ for batch in tqdm(test_dataloader):
         save_image(gt_images[0].cpu().float()*0.5+0.5, output_filename=f"generated_images/Testset_Ground Truth Image_{count}")
         save_image(generated_images_cond[i].cpu(), output_filename=f"generated_images/Generated Conditioning Image_{count}")
         count += 1
+        
     
