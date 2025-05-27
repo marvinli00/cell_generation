@@ -26,6 +26,7 @@ from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 from diffusers.utils import is_tensorboard_available, is_wandb_available
 
+from models.dit import create_dit_model
 
 def main():
     """Main training function."""
@@ -83,7 +84,10 @@ def main():
         weight_dtype = torch.bfloat16
     
     # Create UNet model
-    model = create_unet_model(args.model_config_name_or_path, args.resolution)
+    if args.use_VIT:
+        model = create_dit_model(args.model_config_name_or_path, args.resolution)
+    else:
+        model = create_unet_model(args.model_config_name_or_path, args.resolution)
     
     # Print model parameter count
     pytorch_total_params = sum(p.numel() for p in model.parameters())
@@ -106,15 +110,15 @@ def main():
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         accelerator = setup_checkpoint_hooks(accelerator, args, ema_model)
     # Setup xformers if requested
-    if args.enable_xformers_memory_efficient_attention:
-        try:
-            from diffusers.utils.import_utils import is_xformers_available
-            if is_xformers_available():
-                model.enable_xformers_memory_efficient_attention()
-            else:
-                raise ImportError("xformers is not available")
-        except ImportError as e:
-            logger.warning(f"{e}. xformers will not be used.")
+    # if args.enable_xformers_memory_efficient_attention:
+    #     try:
+    #         from diffusers.utils.import_utils import is_xformers_available
+    #         if is_xformers_available():
+    #             model.enable_xformers_memory_efficient_attention()
+    #         else:
+    #             raise ImportError("xformers is not available")
+    #     except ImportError as e:
+    #         logger.warning(f"{e}. xformers will not be used.")
     
     # Create noise scheduler
     noise_scheduler = create_edm_scheduler(
@@ -276,7 +280,12 @@ def main():
                 
                 model_input, timestep_input = edm_clean_image_to_model_input(x_noisy, sigmas)
                 timestep_input = timestep_input.squeeze()
-                
+
+                #for nn.embedding 
+                if args.use_VIT:
+                    protein_label = protein_label.reshape(-1)
+                    cellline_label = cellline_label.reshape(-1)
+
                 # Get model output
                 model_output = model(
                     model_input, 

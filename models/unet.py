@@ -8,6 +8,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.configuration_utils import register_to_config
+from diffusers.configuration_utils import ConfigMixin, register_to_config
+from diffusers.models.modeling_utils import ModelMixin
+from diffusers.models.transformers.dit_transformer_2d import DiTTransformer2DModel
+
+
 class CustomUNetWithEmbeddings(UNet2DConditionModel):
     @register_to_config
     def __init__(
@@ -85,6 +90,9 @@ class CustomUNetWithEmbeddings(UNet2DConditionModel):
             class_labels=final_class_labels, # Use the computed embedding
             **kwargs # Pass through any other args
         )
+
+
+
 
 def create_unet_model(config=None, resolution=32):
     """

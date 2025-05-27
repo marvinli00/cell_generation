@@ -152,6 +152,9 @@ def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dro
     """
     # Concatenate latents along the channel dimension
     clean_images = torch.cat([gt_latents, cond_latents], dim=1).to(weight_dtype) / 4
+
+    #Do Not USE cond_latents as input for now
+    clean_images = gt_latents.to(weight_dtype) / 4
     
     # Create dropout mask
     dropout_mask = torch.rand(protein_label.shape, dtype=weight_dtype, device=clean_images.device) > dropout_prob

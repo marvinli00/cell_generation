@@ -26,7 +26,8 @@
                 "--mixed_precision=bf16",
                 "--dataloader_num_workers=5",
                 "--checkpointing_steps=10000"
-            ]
+            ],
+            "justMyCode": false,
         }
     ]
 }

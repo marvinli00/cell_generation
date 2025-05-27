@@ -143,6 +143,14 @@ vae_path = "/home/pc/Documents/twisted_diffusion_helper_model/vae"
 classifier_path = "/home/pc/Documents/twisted_diffusion_helper_model/checkpoints_classifier/model_epoch_7.pth"
 clip_model_path = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
 
+
+#check if running in slurm based
+if "SLURM_JOB_ID" in os.environ:
+    model_path = "two_labels_latent_diffusion_edm_silu_less_cross_attn/checkpoint-200000"  # Update this to your model checkpoint path
+    vae_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/stable-diffusion-3.5-large-turbo/vae"
+    classifier_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/checkpoints_classifier/model_epoch_7.pth"
+    clip_model_path = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+
 # Set EDM parameters
 sigma_min = EDM_CONFIG["SIGMA_MIN"]
 sigma_max = EDM_CONFIG["SIGMA_MAX"]
@@ -363,7 +371,7 @@ def sample_edm(
     vae = None,
     cell_subcelluar_location = None,
 ):      
-    wandb.init(project="Twisted Diffusion", name="Twisted Diffusion")
+    #wandb.init(project="Twisted Diffusion", name="Twisted Diffusion")
     batch_size = number_of_particles
     protein_labels = protein_labels.repeat(batch_size, 1)
     cell_line_labels = cell_line_labels.repeat(batch_size, 1)
@@ -436,7 +444,7 @@ def sample_edm(
         latents.requires_grad = True
         # Combine latents with condition latent
         combined_latent = latents
-        wandb.log({"latents": latents.max()}, step=i)
+        #wandb.log({"latents": latents.max()}, step=i)
         # Prepare input with noise according to EDM formulation
         model_input, timestep_input = edm_clean_image_to_model_input(combined_latent, sigma_hat_view)
         timestep_input = timestep_input.squeeze()
@@ -475,8 +483,8 @@ def sample_edm(
             log_prob_classifier = torch.log(probs + eps) * cell_subcelluar_location + torch.log(1 - probs + eps) * (1 - cell_subcelluar_location)
             log_prob_classifier = log_prob_classifier.sum(dim = 1)
             most_likely_index = torch.argmax(log_prob_classifier, dim=0)
-            wandb.log({"log_prob_classifier": log_prob_classifier.mean()}, step=i)
-            wandb.log({"most_likely_index": most_likely_index}, step=i)
+            #wandb.log({"log_prob_classifier": log_prob_classifier.mean()}, step=i)
+            #wandb.log({"most_likely_index": most_likely_index}, step=i)
 
             
             
@@ -551,7 +559,7 @@ def sample_edm(
             log_w_accumulated = log_w + log_w_prev_accumulated
                 
             ess =  compute_ess_from_log_w(log_w_accumulated)
-            wandb.log({"ess": ess}, step=i)
+            #wandb.log({"ess": ess}, step=i)
             # ess = self.compute_ess(log_w_accumulated)
             ess_tracker.append(ess.detach().cpu().numpy())
             #self.run.log({"ess": ess})
@@ -568,17 +576,30 @@ def sample_edm(
             latents = latents_twisted
     return latents, most_likely_index
 
-test_dataset = FullFieldDataset(
-        data_root='/home/pc/Documents/twisted_diffusion_helper_model/test_images',
-        label_dict='/home/pc/Documents/twisted_diffusion_helper_model/antibody_map.pkl',
-        annotation_dict='/home/pc/Documents/twisted_diffusion_helper_model/annotation_map.pkl',
-        is_train=False
-    )
+
+if "SLURM_JOB_ID" not in os.environ:
+
+    test_dataset = FullFieldDataset(
+            data_root='/home/pc/Documents/twisted_diffusion_helper_model/test_images',
+            label_dict='/home/pc/Documents/twisted_diffusion_helper_model/antibody_map.pkl',
+            annotation_dict='/home/pc/Documents/twisted_diffusion_helper_model/annotation_map.pkl',
+            is_train=False
+        )
+
+else:
+    test_dataset = FullFieldDataset(
+            data_root='/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/test_images',
+            label_dict='/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/antibody_map.pkl',
+            annotation_dict='/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/annotation_map.pkl',
+            is_train=False
+        )
+
 test_dataloader = torch.utils.data.DataLoader(
     test_dataset, 
     batch_size=1, 
     shuffle=False,
 )
+
 # Get a batch of test data
 #batch = next(iter(test_dataloader))
 from tqdm import tqdm

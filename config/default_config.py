@@ -33,6 +33,12 @@ def parse_args():
     
     # Model parameters
     parser.add_argument(
+        "--use_VIT",
+        type=bool,
+        default=True,
+        help="If true, using vit for backbone, else use unet."
+    )
+    parser.add_argument(
         "--model_config_name_or_path",
         type=str,
         default=None,
