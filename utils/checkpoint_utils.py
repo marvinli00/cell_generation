@@ -2,9 +2,10 @@ import os
 import shutil
 from pathlib import Path
 from diffusers import DiffusionPipeline, UNet2DConditionModel
+from models.dit import DiTTransformer2DModelWithCrossAttention
 from diffusers.training_utils import EMAModel
 from huggingface_hub import create_repo, upload_folder
-
+import torch
 def setup_checkpoint_hooks(accelerator, args, ema_model=None):
     """
     Set up custom hooks for saving and loading checkpoints with accelerate.
@@ -35,13 +36,13 @@ def setup_checkpoint_hooks(accelerator, args, ema_model=None):
     def load_model_hook(models, input_dir):
         # Load EMA model if used
         if args.use_ema and ema_model is not None:
-            load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), UNet2DConditionModel)
+            load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), DiTTransformer2DModelWithCrossAttention)
             ema_model.load_state_dict(load_model.state_dict())
             ema_model.to(accelerator.device)
             del load_model
         if args.use_ema:
             try:
-                load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), UNet2DConditionModel)
+                load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), DiTTransformer2DModelWithCrossAttention)
                 ema_model.load_state_dict(load_model.state_dict())
                 ema_model.to(accelerator.device)
                 accelerator.ema_model = ema_model
@@ -54,7 +55,7 @@ def setup_checkpoint_hooks(accelerator, args, ema_model=None):
             model = models.pop()
             
             # Load diffusers style into model
-            load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+            load_model = DiTTransformer2DModelWithCrossAttention.from_pretrained(input_dir, subfolder="unet")
             model.register_to_config(**load_model.config)
             model.load_state_dict(load_model.state_dict())
             del load_model
@@ -145,7 +146,7 @@ def find_latest_checkpoint(output_dir):
     
     return os.path.join(output_dir, latest_dir)
 
-def resume_from_checkpoint(accelerator, args):
+def resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch=0):
     """
     Resume training from a checkpoint.
     
@@ -179,12 +180,95 @@ def resume_from_checkpoint(accelerator, args):
         global_step = int(checkpoint_path.split("-")[-1])
         
         # Calculate epoch and step to resume from
-        num_update_steps_per_epoch = args.get("num_update_steps_per_epoch", 0)
+        #num_update_steps_per_epoch = args.get("num_update_steps_per_epoch", 0)
         if num_update_steps_per_epoch > 0:
             first_epoch = global_step // num_update_steps_per_epoch
             resume_step = global_step % num_update_steps_per_epoch
     
     return global_step, first_epoch, resume_step
+def transfer_from_checkpoint(args, model, ema_model):
+    """
+    transfer training from a checkpoint.
+    
+    Args:
+        accelerator: Accelerator instance
+        args: Training arguments
+        
+    Returns:
+        tuple: (global_step, first_epoch, resume_step)
+    """
+    
+    if args.transfer_weights is None:
+        return model, ema_model
+    else:
+        input_dir = args.transfer_weights
+    
+    
+    # Load diffusers style into model
+    # Fix: Add low_cpu_mem_usage=False to ensure actual tensors are loaded
+    load_model = DiTTransformer2DModelWithCrossAttention.from_pretrained(
+        input_dir, 
+        subfolder="unet", 
+        ignore_mismatched_sizes=True,
+        low_cpu_mem_usage=False,  # This ensures actual tensors are loaded
+        torch_dtype=torch.float32  # Specify dtype to avoid meta tensors
+    )
+
+    # Load state dict with key matching
+    load_state_dict = load_model.state_dict()
+    model_state_dict = model.state_dict()
+    
+    # Find matching keys
+    matched_keys = []
+    mismatched_keys = []
+    missing_keys = []
+    unexpected_keys = []
+    
+    for key in model_state_dict.keys():
+        if key in load_state_dict:
+            if model_state_dict[key].shape == load_state_dict[key].shape:
+                matched_keys.append(key)
+            else:
+                mismatched_keys.append((key, model_state_dict[key].shape, load_state_dict[key].shape))
+        else:
+            missing_keys.append(key)
+    
+    for key in load_state_dict.keys():
+        if key not in model_state_dict:
+            unexpected_keys.append(key)
+    
+    # Load only matching keys
+    filtered_state_dict = {k: load_state_dict[k] for k in matched_keys}
+    model.load_state_dict(filtered_state_dict, strict=False)
+    
+    # Report mismatches
+    if mismatched_keys:
+        print(f"Mismatched keys (skipped): {len(mismatched_keys)}")
+        for key, model_shape, load_shape in mismatched_keys[:5]:  # Show first 5
+            print(f"  {key}: model {model_shape} vs checkpoint {load_shape}")
+    if missing_keys:
+        print(f"Missing keys in checkpoint: {len(missing_keys)}")
+    if unexpected_keys:
+        print(f"Unexpected keys in checkpoint: {len(unexpected_keys)}")
+    print(f"Successfully loaded {len(matched_keys)} matching keys")
+    del load_model
+    if args.use_ema and ema_model is not None:
+        try:
+            load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), DiTTransformer2DModelWithCrossAttention)
+            ema_model.load_state_dict(load_model.state_dict())
+            del load_model
+        except:
+            ema_model = EMAModel(
+                model.parameters(),
+                decay=args.ema_max_decay,
+                use_ema_warmup=True,
+                inv_gamma=args.ema_inv_gamma,
+                power=args.ema_power,
+                model_cls=type(model),
+                model_config=model.config,
+            )
+            print("no ema found. init ema with model weights")
+    return model, ema_model
 
 def save_pipeline_to_hub(args, model, scheduler, output_dir):
     """

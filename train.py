@@ -17,7 +17,7 @@ from data.dataset import FullFieldDataset
 from models.unet import create_unet_model, setup_model_devices, load_vae, load_classifier, load_clip_model, CustomUNetWithEmbeddings
 from schedulers.edm_scheduler import create_edm_scheduler, prepare_input_with_noise, calculate_edm_loss
 from utils.logging_utils import setup_logging, configure_diffusers_logging, log_training_parameters
-from utils.checkpoint_utils import setup_checkpoint_hooks, save_checkpoint, cleanup_checkpoints, resume_from_checkpoint
+from utils.checkpoint_utils import setup_checkpoint_hooks, save_checkpoint, cleanup_checkpoints, resume_from_checkpoint, transfer_from_checkpoint
 from utils.edm_utils import edm_precondition, edm_loss_weight, prepare_latent_sample, prepare_model_inputs, edm_clean_image_to_model_input, edm_model_output_to_x_0_hat
 
 # Import required diffusers components
@@ -107,6 +107,11 @@ def main():
         # Setup checkpoint hooks for accelerator
     else:
         ema_model = None
+
+    # model, ema_model = transfer_from_checkpoint(args, model, ema_model)
+
+        
+    
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         accelerator = setup_checkpoint_hooks(accelerator, args, ema_model)
     # Setup xformers if requested
@@ -140,7 +145,10 @@ def main():
     
     # Create dataset and dataloader
     dataset = FullFieldDataset(
-        data_root='/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/training_images',
+        data_root='/scratch/groups/emmalu/multimodal_phenotyping/dataset/train/',
+        label_dict = '/scratch/groups/emmalu/multimodal_phenotyping/cell_line_map.pkl',
+        annotation_dict = '/scratch/groups/emmalu/multimodal_phenotyping/antibody_map.pkl',
+        
     )
     logger.info(f"Dataset size: {len(dataset)}")
     
@@ -205,9 +213,8 @@ def main():
     log_training_parameters(
         logger, args, total_batch_size, num_update_steps_per_epoch, max_train_steps, len(dataset)
     )
-    
     # Resume from checkpoint if requested
-    global_step, first_epoch, resume_step = resume_from_checkpoint(accelerator, args)
+    global_step, first_epoch, resume_step = resume_from_checkpoint(accelerator, args, num_update_steps_per_epoch = num_update_steps_per_epoch)
     
     # Training loop
     for epoch in range(first_epoch, args.num_epochs):
@@ -235,7 +242,7 @@ def main():
                 clip_images = batch["clip_image"].to(weight_dtype)
                 encoder_hidden_states = clip_model(clip_images)
                 # Prepare model inputs (combined latents and labels)
-                clean_images, (protein_label, cellline_label), encoder_hidden_states, dropout_mask = prepare_model_inputs(
+                (clean_images, cond_latents), (protein_label, cellline_label), encoder_hidden_states, dropout_mask = prepare_model_inputs(
                     gt_images_latent, 
                     cond_images_latent, 
                     batch["cell_line"], 
@@ -246,7 +253,7 @@ def main():
                 )
                 
                 # Get annotation ground truth
-                ground_truth_location = batch["annotation"]
+                #ground_truth_location = batch["annotation"]
             
             # Sample noise and timesteps
             noise = torch.randn(clean_images.shape, dtype=weight_dtype, device=clean_images.device)
@@ -286,9 +293,11 @@ def main():
                     protein_label = protein_label.reshape(-1)
                     cellline_label = cellline_label.reshape(-1)
 
+                #concatenate model_input and cond_images_latent
+                model_input_concat = torch.cat([model_input, cond_latents], dim=1)
                 # Get model output
                 model_output = model(
-                    model_input, 
+                    model_input_concat, 
                     timestep_input,
                     protein_labels = protein_label,
                     cell_line_labels = cellline_label,
@@ -306,9 +315,7 @@ def main():
                 weights = edm_loss_weight(sigmas)
                 loss = weights*((x_0_hat.float() - target.float()) ** 2)
 
-                loss = loss
-                loss_gt = loss[:,:16]
-                loss = loss.mean() + loss_gt.mean()
+                loss = loss.mean()
 
                 # Optional location loss using classifier
                 if False:  # Set to True to enable location loss

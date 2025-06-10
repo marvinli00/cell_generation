@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from abc import ABC, abstractmethod
 from utils.edm_utils import edm_clean_image_to_model_input, edm_model_output_to_x_0_hat
-
+import pandas as pd
 import math
 from torch.distributions.normal import Normal
 from functools import partial
@@ -142,14 +142,6 @@ model_path = "/home/pc/Documents/twisted_diffusion/two_labels_latent_diffusion_e
 vae_path = "/home/pc/Documents/twisted_diffusion_helper_model/vae"
 classifier_path = "/home/pc/Documents/twisted_diffusion_helper_model/checkpoints_classifier/model_epoch_7.pth"
 clip_model_path = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
-
-
-#check if running in slurm based
-if "SLURM_JOB_ID" in os.environ:
-    model_path = "two_labels_latent_diffusion_edm_silu_less_cross_attn/checkpoint-200000"  # Update this to your model checkpoint path
-    vae_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/stable-diffusion-3.5-large-turbo/vae"
-    classifier_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/checkpoints_classifier/model_epoch_7.pth"
-    clip_model_path = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
 
 # Set EDM parameters
 sigma_min = EDM_CONFIG["SIGMA_MIN"]
@@ -371,7 +363,7 @@ def sample_edm(
     vae = None,
     cell_subcelluar_location = None,
 ):      
-    #wandb.init(project="Twisted Diffusion", name="Twisted Diffusion")
+    wandb.init(project="Twisted Diffusion", name="Twisted Diffusion")
     batch_size = number_of_particles
     protein_labels = protein_labels.repeat(batch_size, 1)
     cell_line_labels = cell_line_labels.repeat(batch_size, 1)
@@ -444,7 +436,7 @@ def sample_edm(
         latents.requires_grad = True
         # Combine latents with condition latent
         combined_latent = latents
-        #wandb.log({"latents": latents.max()}, step=i)
+        wandb.log({"latents": latents.max()}, step=i)
         # Prepare input with noise according to EDM formulation
         model_input, timestep_input = edm_clean_image_to_model_input(combined_latent, sigma_hat_view)
         timestep_input = timestep_input.squeeze()
@@ -483,8 +475,8 @@ def sample_edm(
             log_prob_classifier = torch.log(probs + eps) * cell_subcelluar_location + torch.log(1 - probs + eps) * (1 - cell_subcelluar_location)
             log_prob_classifier = log_prob_classifier.sum(dim = 1)
             most_likely_index = torch.argmax(log_prob_classifier, dim=0)
-            #wandb.log({"log_prob_classifier": log_prob_classifier.mean()}, step=i)
-            #wandb.log({"most_likely_index": most_likely_index}, step=i)
+            wandb.log({"log_prob_classifier": log_prob_classifier.mean()}, step=i)
+            wandb.log({"most_likely_index": most_likely_index}, step=i)
 
             
             
@@ -559,7 +551,7 @@ def sample_edm(
             log_w_accumulated = log_w + log_w_prev_accumulated
                 
             ess =  compute_ess_from_log_w(log_w_accumulated)
-            #wandb.log({"ess": ess}, step=i)
+            wandb.log({"ess": ess}, step=i)
             # ess = self.compute_ess(log_w_accumulated)
             ess_tracker.append(ess.detach().cpu().numpy())
             #self.run.log({"ess": ess})
@@ -576,30 +568,17 @@ def sample_edm(
             latents = latents_twisted
     return latents, most_likely_index
 
-
-if "SLURM_JOB_ID" not in os.environ:
-
-    test_dataset = FullFieldDataset(
-            data_root='/home/pc/Documents/twisted_diffusion_helper_model/test_images',
-            label_dict='/home/pc/Documents/twisted_diffusion_helper_model/antibody_map.pkl',
-            annotation_dict='/home/pc/Documents/twisted_diffusion_helper_model/annotation_map.pkl',
-            is_train=False
-        )
-
-else:
-    test_dataset = FullFieldDataset(
-            data_root='/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/test_images',
-            label_dict='/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/antibody_map.pkl',
-            annotation_dict='/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/annotation_map.pkl',
-            is_train=False
-        )
-
+test_dataset = FullFieldDataset(
+        data_root='/home/pc/Documents/twisted_diffusion_helper_model/test_images',
+        label_dict='/home/pc/Documents/twisted_diffusion_helper_model/antibody_map.pkl',
+        annotation_dict='/home/pc/Documents/twisted_diffusion_helper_model/annotation_map.pkl',
+        is_train=False
+    )
 test_dataloader = torch.utils.data.DataLoader(
     test_dataset, 
     batch_size=1, 
     shuffle=False,
 )
-
 # Get a batch of test data
 #batch = next(iter(test_dataloader))
 from tqdm import tqdm
@@ -607,6 +586,9 @@ from tqdm import tqdm
 weight_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 clip_model.to(weight_dtype)
 count = 0
+
+protein_name_list = []
+cell_line_name_list = []
 for batch in tqdm(test_dataloader):
 
     # Show conditioning image
@@ -622,6 +604,13 @@ for batch in tqdm(test_dataloader):
     cell_line = batch["cell_line"].to(device).long()
     protein_label = batch["label"].to(device).long()
     
+    protein_name = batch["protein_name"]
+    cell_line_name = batch["cell_line_name"]
+    protein_name_list.append(protein_name)
+    cell_line_name_list.append(cell_line_name)
+    
+    
+    continue
     cell_subcelluar_location = batch["annotation"].to(device).long()
     
     #one hot encoding
@@ -691,3 +680,13 @@ for batch in tqdm(test_dataloader):
         count += 1
         
     
+#save the two lists to a csv file
+
+
+data = {
+    "protein_name": protein_name_list,
+    "cell_line_name": cell_line_name_list
+}
+
+df = pd.DataFrame(data)
+df.to_csv("protein_cell_line_names.csv", index=False)

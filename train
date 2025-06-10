@@ -1,0 +1,12 @@
+#!/bin/bash
+
+#SBATCH -p emmalu
+#SBATCH --nodes=1               # Number of nodes
+#SBATCH --cpus-per-task=26
+#SBATCH --gres=gpu:6                # Number of GPUs per node
+#SBATCH --mem=80G                      # Memory per node
+#SBATCH --time=7-00:00:00 
+
+
+accelerate launch --multi_gpu --num_processes=6 --main_process_port=12365 train.py     --dataset_name=huggan/pokemon     --resolution=256     --center_crop     --random_flip     --output_dir="../sunh/unconditional/"     --train_batch_size=32     --num_epochs=200    --gradient_accumulation_steps=1     --use_ema     --learning_rate=5e-5     --logger=wandb     --lr_warmup_steps=500     --mixed_precision=no     --dataloader_num_workers=4     --checkpointing_steps=10000  --resume_from_checkpoint="/scratch/groups/emmalu/marvinli/twisted_diffusion/sunh/two_labels_latent_diffusion_edm_silu_cross_attention/checkpoint-640500"
+

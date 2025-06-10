@@ -5,6 +5,7 @@ from diffusers.utils.torch_utils import maybe_allow_in_graph
 from typing import Optional, Tuple, Dict, Any
 import torch
 import torch.nn as nn
+from diffusers.configuration_utils import register_to_config, ConfigMixin
 class AdaLayerNormZeroContinuous(nn.Module):
     r"""
     Norm layer adaptive layer norm zero (adaLN-Zero).
@@ -14,18 +15,17 @@ class AdaLayerNormZeroContinuous(nn.Module):
         num_cell_line_labels (`int`): The size of the embeddings dictionary.
         num_protein_labels (`int`): The size of the embeddings dictionary.
     """
-
     def __init__(self, embedding_dim: int, num_protein_labels: Optional[int] = None, num_cell_line_labels: Optional[int] = None, norm_type="layer_norm", bias=True):
         super().__init__()
         if num_protein_labels is not None and num_cell_line_labels is not None:
-            self.emb_protein_labels = CombinedTimestepLabelEmbeddings(num_protein_labels, embedding_dim)
-            self.emb_cell_line_labels = CombinedTimestepLabelEmbeddings(num_cell_line_labels, embedding_dim)
+            self.emb_protein_labels = CombinedTimestepLabelEmbeddings(num_protein_labels, embedding_dim // 2)
+            self.emb_cell_line_labels = CombinedTimestepLabelEmbeddings(num_cell_line_labels, embedding_dim // 2)
             self.emb = True
         else:
             self.emb = None
 
         self.silu = nn.SiLU()
-        self.linear = nn.Linear(2 * embedding_dim, 6 * embedding_dim, bias=bias)
+        self.linear = nn.Linear(embedding_dim, 6 * embedding_dim, bias=bias)
         if norm_type == "layer_norm":
             self.norm = nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
         elif norm_type == "fp32_layer_norm":

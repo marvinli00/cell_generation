@@ -8,4 +8,10 @@ two_labels_latent_diffusion_edm_silu/
 two_labels_latent_diffusion_edm_silu_less_cross_attn/
 generated_images/
 generated_images_1/
+generated_images_2/
 generated_images.zip
+two_labels_latent_diffusion_edm_vit/
+two_labels_latent_diffusion_edm_silu_cross_attention_2/
+two_labels_latent_diffusion_edm_silu_cross_attention/
+DiT-XL-2-256/
+DiT-XL-2-512/

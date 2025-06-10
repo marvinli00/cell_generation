@@ -191,7 +191,7 @@ def parse_args():
     parser.add_argument(
         "--ema_max_decay", 
         type=float, 
-        default=0.9999, 
+        default=0.999, 
         help="The maximum decay magnitude for EMA."
     )
     
@@ -254,6 +254,15 @@ def parse_args():
         choices=["tensorboard", "wandb"],
         help="Whether to use tensorboard or wandb for experiment tracking and logging."
     )
+    
+    parser.add_argument(
+        "--transfer_weights",
+        type=str,
+        default=None,
+        help="Whether training should be initialized from a previous checkpoint."
+    )
+
+
     
     # Checkpointing parameters
     parser.add_argument(

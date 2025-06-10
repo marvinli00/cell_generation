@@ -135,7 +135,7 @@ def prepare_latent_sample(vae, images, weight_dtype):
         
     return latents
 
-def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dropout_prob=0.2, weight_dtype=torch.float32, encoder_hidden_states=None):
+def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dropout_prob=1, weight_dtype=torch.float32, encoder_hidden_states=None):
     """
     Prepare model inputs including class labels with dropout.
     
@@ -155,7 +155,7 @@ def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dro
 
     #Do Not USE cond_latents as input for now
     clean_images = gt_latents.to(weight_dtype) / 4
-    
+    cond_latents = gt_latents.to(weight_dtype) / 4
     # Create dropout mask
     dropout_mask = torch.rand(protein_label.shape, dtype=weight_dtype, device=clean_images.device) > dropout_prob
     
@@ -177,9 +177,9 @@ def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dro
     
     if encoder_hidden_states is not None:
         # Concatenate encoder hidden states if provided
-        encoder_hidden_states = encoder_hidden_states * dropout_mask.reshape(-1, 1,1)
+        encoder_hidden_states = encoder_hidden_states # * dropout_mask.reshape(-1, 1,1)
 
-    return clean_images, total_label, encoder_hidden_states, dropout_mask
+    return (clean_images, cond_latents), total_label, encoder_hidden_states, dropout_mask
 
 def decode_latents(vae, latents):
     """

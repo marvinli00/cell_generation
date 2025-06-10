@@ -28,7 +28,7 @@ from models.MarvinsBasicTransformerBlock import MarvinsBasicTransformerBlock
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-class DiTTransformer2DModelWithCrossAttention(DiTTransformer2DModel):
+class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
     r"""
     A 2D Transformer model as introduced in DiT (https://arxiv.org/abs/2212.09748).
 
@@ -63,9 +63,9 @@ class DiTTransformer2DModelWithCrossAttention(DiTTransformer2DModel):
         norm_eps (float, optional, defaults to 1e-5):
             A small constant added to the denominator in normalization layers to prevent division by zero.
     """
-
+    _skip_layerwise_casting_patterns = ["pos_embed", "norm"]
     _supports_gradient_checkpointing = True
-
+    _supports_group_offloading = False
     @register_to_config
     def __init__(
         self,
@@ -91,37 +91,59 @@ class DiTTransformer2DModelWithCrossAttention(DiTTransformer2DModel):
         num_cell_labels = 41,        # 40 + 1,
         positional_embeddings: Optional[torch.Tensor] = None,
     ):
-        super().__init__(
-            num_attention_heads=num_attention_heads,
-            attention_head_dim=attention_head_dim,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            num_layers=num_layers,
-            dropout=dropout,
-            norm_num_groups=norm_num_groups,
-            attention_bias=attention_bias,
-            sample_size=sample_size,
-            patch_size=patch_size,
-            activation_fn=activation_fn,
-            num_embeds_ada_norm=num_embeds_ada_norm,
-            upcast_attention=upcast_attention,
-            norm_type=norm_type if norm_type != "ada_norm_zero_continuous" else "ada_norm_zero",
-            norm_elementwise_affine=norm_elementwise_affine,
-            norm_eps=norm_eps,
-            # The DiTTransformer2DModelWithCrossAttention is a subclass of DiTTransformer2DModel
+        super().__init__()
+
+
+        # Set some common variables used across the board.
+        self.attention_head_dim = attention_head_dim
+        self.inner_dim = self.config.num_attention_heads * self.config.attention_head_dim
+        self.out_channels = in_channels if out_channels is None else out_channels
+        self.gradient_checkpointing = False
+
+        # 2. Initialize the position embedding and transformer blocks.
+        self.height = self.config.sample_size
+        self.width = self.config.sample_size
+
+        self.patch_size = self.config.patch_size
+        self.pos_embed = PatchEmbed(
+            height=self.config.sample_size,
+            width=self.config.sample_size,
+            patch_size=self.config.patch_size,
+            in_channels=self.config.in_channels,
+            embed_dim=self.inner_dim,
         )
-        # self.patch_size = self.config.patch_size
-        # self.pos_embed = PatchEmbed(
-        #     height=self.config.sample_size,
-        #     width=self.config.sample_size,
-        #     patch_size=self.config.patch_size,
-        #     in_channels=self.config.in_channels,
-        #     embed_dim=self.inner_dim,
+        # super().__init__(
+        #     num_attention_heads=num_attention_heads,
+        #     attention_head_dim=attention_head_dim,
+        #     in_channels=in_channels,
+        #     out_channels=out_channels,
+        #     num_layers=num_layers,
+        #     dropout=dropout,
+        #     norm_num_groups=norm_num_groups,
+        #     attention_bias=attention_bias,
+        #     sample_size=sample_size,
+        #     patch_size=patch_size,
+        #     activation_fn=activation_fn,
+        #     num_embeds_ada_norm=num_embeds_ada_norm,
+        #     upcast_attention=upcast_attention,
+        #     norm_type=norm_type if norm_type != "ada_norm_zero_continuous" else "ada_norm_zero",
+        #     norm_elementwise_affine=norm_elementwise_affine,
+        #     norm_eps=norm_eps,
+        #     # The DiTTransformer2DModelWithCrossAttention is a subclass of DiTTransformer2DModel
         # )
 
-        self.cross_attention_dim = cross_attention_dim
-        self.proj_out_1 = nn.Linear(2 * self.inner_dim, 2 * self.inner_dim)
+        #simple nlp to compress encoder_hidden_states
+        self.encoder_hidden_states_compress = None
+        if self.cross_attention_dim is not None:
+            self.encoder_hidden_states_compress = nn.Sequential(
+                                                        nn.Linear(cross_attention_dim, cross_attention_dim//2),
+                                                        nn.SiLU(),
+                                                        nn.Linear(cross_attention_dim//2, cross_attention_dim//4),
+            )
 
+
+            self.cross_attention_dim = cross_attention_dim//4
+        #self.config.norm_type = "ada_norm_zero_continuous"
         self.transformer_blocks = nn.ModuleList(
             [
                 MarvinsBasicTransformerBlock(
@@ -143,6 +165,30 @@ class DiTTransformer2DModelWithCrossAttention(DiTTransformer2DModel):
                 )   
                 for _ in range(self.config.num_layers)
             ]
+        )
+        # 3. Output blocks.
+        self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
+        self.proj_out_1 = nn.Linear(self.inner_dim, 2 * self.inner_dim)
+        self.proj_out_2 = nn.Linear(
+            self.inner_dim, self.config.patch_size * self.config.patch_size * self.out_channels
+        )
+
+        #write a resnet block to downsample input to 16
+        self.conv_down = nn.Conv2d(
+            in_channels=32,
+            out_channels=4,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+        self.conv_up = nn.Conv2d(
+            in_channels=8,
+            out_channels=16,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
         )
 
     def _set_gradient_checkpointing(self, module, value=False):
@@ -183,10 +229,15 @@ class DiTTransformer2DModelWithCrossAttention(DiTTransformer2DModel):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
+
+        # 0.Input 
+        hidden_states = self.conv_down(hidden_states)
+
         # 1. Input
         height, width = hidden_states.shape[-2] // self.patch_size, hidden_states.shape[-1] // self.patch_size
         hidden_states = self.pos_embed(hidden_states)
-
+        if self.encoder_hidden_states_compress is not None:
+            encoder_hidden_states = self.encoder_hidden_states_compress(encoder_hidden_states)
         # 2. Blocks
         for block in self.transformer_blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -242,6 +293,9 @@ class DiTTransformer2DModelWithCrossAttention(DiTTransformer2DModel):
             shape=(-1, self.out_channels, height * self.patch_size, width * self.patch_size)
         )
 
+        # 4.output
+        output = self.conv_up(output)
+
         if not return_dict:
             return (output,)
 
@@ -251,15 +305,18 @@ class DiTTransformer2DModelWithCrossAttention(DiTTransformer2DModel):
 def create_dit_model(config=None, resolution=32):
     if config is None:
         model = DiTTransformer2DModelWithCrossAttention(
+                # num_attention_heads = 16,
+                # attention_head_dim = 72,
+
                 num_attention_heads = 16,
                 attention_head_dim = 72,
-                in_channels = 16,
-                out_channels = 16,
+                in_channels = 4,
+                out_channels = 8,
                 num_layers = 28,
                 dropout = 0.0,
                 norm_num_groups = 32,
                 attention_bias = True,
-                sample_size = 32,
+                sample_size = 64,
                 patch_size = 2,
                 activation_fn = "gelu-approximate",
                 num_embeds_ada_norm = 1000,
@@ -267,14 +324,14 @@ def create_dit_model(config=None, resolution=32):
                 norm_type = "ada_norm_zero_continuous",
                 norm_elementwise_affine = False,
                 norm_eps = 1e-5,
-                cross_attention_dim = 768,
+                cross_attention_dim = None,
                 #must couple with ada_norm_zero_continuous
-                num_protein_labels = 13349,  # 13348 + 1
-                num_cell_labels = 41,        # 40 + 1,
+                num_protein_labels = 12810,  # 12782 + 1
+                num_cell_labels = 42,        # 41 + 1,
                 positional_embeddings = None
             )
 
     else:
-        print("no model")
+        model = DiTTransformer2DModelWithCrossAttention.from_pretrained()
     
     return model
