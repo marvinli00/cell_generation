@@ -6,6 +6,8 @@ from typing import Optional, Tuple, Dict, Any
 import torch
 import torch.nn as nn
 from diffusers.configuration_utils import register_to_config, ConfigMixin
+
+
 class AdaLayerNormZeroContinuous(nn.Module):
     r"""
     Norm layer adaptive layer norm zero (adaLN-Zero).
@@ -15,14 +17,8 @@ class AdaLayerNormZeroContinuous(nn.Module):
         num_cell_line_labels (`int`): The size of the embeddings dictionary.
         num_protein_labels (`int`): The size of the embeddings dictionary.
     """
-    def __init__(self, embedding_dim: int, num_protein_labels: Optional[int] = None, num_cell_line_labels: Optional[int] = None, norm_type="layer_norm", bias=True):
+    def __init__(self, embedding_dim: int, norm_type="layer_norm", bias=True):
         super().__init__()
-        if num_protein_labels is not None and num_cell_line_labels is not None:
-            self.emb_protein_labels = CombinedTimestepLabelEmbeddings(num_protein_labels, embedding_dim // 2)
-            self.emb_cell_line_labels = CombinedTimestepLabelEmbeddings(num_cell_line_labels, embedding_dim // 2)
-            self.emb = True
-        else:
-            self.emb = None
 
         self.silu = nn.SiLU()
         self.linear = nn.Linear(embedding_dim, 6 * embedding_dim, bias=bias)
@@ -37,24 +33,12 @@ class AdaLayerNormZeroContinuous(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        timestep: Optional[torch.Tensor] = None,
-        protein_labels: Optional[torch.LongTensor] = None,
-        cell_line_labels: Optional[torch.LongTensor] = None,
-        hidden_dtype: Optional[torch.dtype] = None,
-        emb: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.emb is not None:
-            emb = self.get_emb(timestep, protein_labels, cell_line_labels, hidden_dtype=hidden_dtype)
+        x: torch.Tensor, emb: Optional[torch.Tensor] = None, hidden_dtype: Optional[torch.dtype] = None,) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         emb = self.linear(self.silu(emb))
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.chunk(6, dim=1)
         x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
         return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
-    def get_emb(self, timestep, protein_labels, cell_line_labels, hidden_dtype):
-        emb_protein = self.emb_protein_labels(timestep, protein_labels, hidden_dtype=hidden_dtype)
-        emb_cell_line = self.emb_cell_line_labels(timestep, cell_line_labels, hidden_dtype=hidden_dtype)
-        emb = torch.cat([emb_protein, emb_cell_line], dim=1)
-        return emb
+
 
 @maybe_allow_in_graph
 class MarvinsBasicTransformerBlock(BasicTransformerBlock):
@@ -150,11 +134,10 @@ class MarvinsBasicTransformerBlock(BasicTransformerBlock):
 
         if norm_type == "ada_norm_zero_continuous":
             self.norm_type = "ada_norm_zero_continuous"
-            self.norm1 = AdaLayerNormZeroContinuous(dim, num_protein_labels, num_cell_labels)
+            self.norm1 = AdaLayerNormZeroContinuous(dim)
             self.norm2 = LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
             self.norm3 = LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
-            #self.norm2 = AdaLayerNormZeroContinuous(dim, num_protein_labels, num_cell_labels)
-            #self.norm3 = AdaLayerNormZeroContinuous(dim, num_protein_labels, num_cell_labels)
+
 
 
     def forward(
@@ -163,11 +146,8 @@ class MarvinsBasicTransformerBlock(BasicTransformerBlock):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
-        timestep: Optional[torch.LongTensor] = None,
+        embedding: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Dict[str, Any] = None,
-        protein_labels: Optional[torch.Tensor] = None,
-        cell_line_labels: Optional[torch.Tensor] = None,
-        class_labels: Optional[torch.Tensor] = None,
         added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         if cross_attention_kwargs is not None:
@@ -196,7 +176,7 @@ class MarvinsBasicTransformerBlock(BasicTransformerBlock):
             norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
         elif self.norm_type == "ada_norm_zero_continuous":
             norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
-                hidden_states, timestep, protein_labels, cell_line_labels, hidden_dtype=hidden_states.dtype
+                hidden_states, embedding, hidden_dtype=hidden_states.dtype
             )
         else:
             raise ValueError("Incorrect norm used")

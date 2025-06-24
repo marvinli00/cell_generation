@@ -114,16 +114,6 @@ def main():
     
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         accelerator = setup_checkpoint_hooks(accelerator, args, ema_model)
-    # Setup xformers if requested
-    # if args.enable_xformers_memory_efficient_attention:
-    #     try:
-    #         from diffusers.utils.import_utils import is_xformers_available
-    #         if is_xformers_available():
-    #             model.enable_xformers_memory_efficient_attention()
-    #         else:
-    #             raise ImportError("xformers is not available")
-    #     except ImportError as e:
-    #         logger.warning(f"{e}. xformers will not be used.")
     
     # Create noise scheduler
     noise_scheduler = create_edm_scheduler(
@@ -145,10 +135,10 @@ def main():
     
     # Create dataset and dataloader
     dataset = FullFieldDataset(
-        data_root='/scratch/groups/emmalu/multimodal_phenotyping/dataset/train/',
+        data_root='/scratch/groups/emmalu/multimodal_phenotyping/dataset/images/',
         label_dict = '/scratch/groups/emmalu/multimodal_phenotyping/cell_line_map.pkl',
         annotation_dict = '/scratch/groups/emmalu/multimodal_phenotyping/antibody_map.pkl',
-        
+        is_train=True
     )
     logger.info(f"Dataset size: {len(dataset)}")
     
@@ -156,7 +146,9 @@ def main():
         dataset, 
         batch_size=args.train_batch_size, 
         shuffle=True, 
-        num_workers=args.dataloader_num_workers
+        num_workers=args.dataloader_num_workers,
+        pin_memory=False,
+        
     )
     
     # Create learning rate scheduler
@@ -170,12 +162,6 @@ def main():
     # Load VAE and classifier
     vae = load_vae(
         vae_path="/scratch/groups/emmalu/marvinli/twisted_diffusion/stable-diffusion-3.5-large-turbo/vae",  # Update with your VAE path
-        accelerator=accelerator,
-        weight_dtype=weight_dtype
-    )
-    
-    classifier_location = load_classifier(
-        checkpoint_path="/scratch/groups/emmalu/marvinli/twisted_diffusion/checkpoints_classifier/model_epoch_7.pth",  # Update with your classifier path
         accelerator=accelerator,
         weight_dtype=weight_dtype
     )
@@ -279,12 +265,6 @@ def main():
                 # Model prediction (pass sigma directly instead of timestep indices)
                 # Add noise according to EDM formulation
                 
-                # protein_label_embedding = model.module.embedding_protein(protein_label)
-                # cellline_label_embedding = model.module.embedding_cell_label(cellline_label)
-                # total_label = torch.cat([protein_label_embedding, cellline_label_embedding], dim=1)
-                # #silu activation
-                # total_label = F.silu(total_label)
-                
                 model_input, timestep_input = edm_clean_image_to_model_input(x_noisy, sigmas)
                 timestep_input = timestep_input.squeeze()
 
@@ -301,7 +281,6 @@ def main():
                     timestep_input,
                     protein_labels = protein_label,
                     cell_line_labels = cellline_label,
-                    #class_labels=total_label,
                     encoder_hidden_states=encoder_hidden_states,
                 ).sample
                 
@@ -317,23 +296,6 @@ def main():
 
                 loss = loss.mean()
 
-                # Optional location loss using classifier
-                if False:  # Set to True to enable location loss
-                    # Generate predicted clean image
-                    
-                    # Reshape and pass through location classifier
-                    x_0_hat = x_0_hat.reshape(-1, 32, 32, 32)
-                    x_0_hat = x_0_hat * 4 / vae.scaling_factor
-                    image_predicted_location = classifier_location(x_0_hat.to(weight_dtype))
-                    
-                    # Calculate location loss
-                    loss_location = F.binary_cross_entropy_with_logits(
-                        image_predicted_location, ground_truth_location, reduction="none"
-                    )
-                    loss_location = loss_location[dropout_mask].mean()
-                    # Combine losses (adjust weight as needed)
-                    loss = loss + 0.01 * loss_location
-                
                 # Backward pass
                 accelerator.backward(loss)
                 
@@ -390,9 +352,6 @@ def main():
                     scheduler=noise_scheduler,
                 )
                 
-                # Optional: Generate sample images for visualization
-                # Implementation depends on your specific inference needs
-                # This would be similar to the inference.py script
                 
                 # Restore original model parameters if EMA was used
                 if args.use_ema:

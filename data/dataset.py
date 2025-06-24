@@ -9,7 +9,7 @@ from skimage.transform import resize
 from torchvision import transforms
 import torch.nn as nn
 
-import open_clip
+import pandas as pd
 
 def make_dataset(dir):
     if os.path.isfile(dir):
@@ -272,8 +272,16 @@ class RandomVerticalFlip(nn.Module):
 class FullFieldDataset(Dataset):
     def __init__(self, data_root = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/", data_len=-1, image_size=[256, 256],
                  label_dict = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/antibody_map.pkl",
-                 annotation_dict = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/annotation_map.pkl",is_train=True):
-        flist = make_dataset(data_root)
+                 annotation_dict = "/scratch/groups/emmalu/multimodal_phenotyping/prot_imp/datasets/annotation_map.pkl", is_train=True):
+        if is_train:
+            flist = pd.read_csv("/scratch/groups/emmalu/multimodal_phenotyping/gen_model_train_images.csv", header=0)
+            # to list
+            flist = flist['train_images'].tolist()
+        else:
+            flist = pd.read_csv("/scratch/groups/emmalu/multimodal_phenotyping/gen_model_test_images.csv", header=0)
+            # to list
+            flist = flist['test_images'].tolist()
+        # flist = make_dataset(data_root)
         if data_len > 0:
             idx = np.random.choice(len(flist), data_len, replace=False)
             self.flist = [flist[i] for i in idx]

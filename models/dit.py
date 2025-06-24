@@ -24,7 +24,11 @@ from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.transformers.dit_transformer_2d import DiTTransformer2DModel 
+from diffusers.models.embeddings import CombinedTimestepLabelEmbeddings
+
+
 from models.MarvinsBasicTransformerBlock import MarvinsBasicTransformerBlock
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
@@ -93,12 +97,14 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
     ):
         super().__init__()
 
-
         # Set some common variables used across the board.
         self.attention_head_dim = attention_head_dim
         self.inner_dim = self.config.num_attention_heads * self.config.attention_head_dim
         self.out_channels = in_channels if out_channels is None else out_channels
         self.gradient_checkpointing = False
+
+        self.emb_protein_labels = CombinedTimestepLabelEmbeddings(num_protein_labels, self.inner_dim // 2)
+        self.emb_cell_line_labels = CombinedTimestepLabelEmbeddings(num_cell_labels, self.inner_dim // 2)
 
         # 2. Initialize the position embedding and transformer blocks.
         self.height = self.config.sample_size
@@ -112,25 +118,6 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
             in_channels=self.config.in_channels,
             embed_dim=self.inner_dim,
         )
-        # super().__init__(
-        #     num_attention_heads=num_attention_heads,
-        #     attention_head_dim=attention_head_dim,
-        #     in_channels=in_channels,
-        #     out_channels=out_channels,
-        #     num_layers=num_layers,
-        #     dropout=dropout,
-        #     norm_num_groups=norm_num_groups,
-        #     attention_bias=attention_bias,
-        #     sample_size=sample_size,
-        #     patch_size=patch_size,
-        #     activation_fn=activation_fn,
-        #     num_embeds_ada_norm=num_embeds_ada_norm,
-        #     upcast_attention=upcast_attention,
-        #     norm_type=norm_type if norm_type != "ada_norm_zero_continuous" else "ada_norm_zero",
-        #     norm_elementwise_affine=norm_elementwise_affine,
-        #     norm_eps=norm_eps,
-        #     # The DiTTransformer2DModelWithCrossAttention is a subclass of DiTTransformer2DModel
-        # )
 
         #simple nlp to compress encoder_hidden_states
         self.encoder_hidden_states_compress = None
@@ -173,24 +160,6 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
             self.inner_dim, self.config.patch_size * self.config.patch_size * self.out_channels
         )
 
-        #write a resnet block to downsample input to 16
-        self.conv_down = nn.Conv2d(
-            in_channels=32,
-            out_channels=4,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True,
-        )
-        self.conv_up = nn.Conv2d(
-            in_channels=8,
-            out_channels=16,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True,
-        )
-
     def _set_gradient_checkpointing(self, module, value=False):
         if hasattr(module, "gradient_checkpointing"):
             module.gradient_checkpointing = value
@@ -231,7 +200,9 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
         """
 
         # 0.Input 
-        hidden_states = self.conv_down(hidden_states)
+        emb_protein = self.emb_protein_labels(timestep, protein_labels, hidden_dtype=timestep.dtype)
+        emb_cell_line = self.emb_cell_line_labels(timestep, cell_line_labels, hidden_dtype=timestep.dtype)
+        emb = torch.cat([emb_protein, emb_cell_line], dim=1)
 
         # 1. Input
         height, width = hidden_states.shape[-2] // self.patch_size, hidden_states.shape[-1] // self.patch_size
@@ -241,7 +212,6 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
         # 2. Blocks
         for block in self.transformer_blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-
                 def create_custom_forward(module, return_dict=None):
                     def custom_forward(*inputs):
                         if return_dict is not None:
@@ -258,10 +228,8 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
                     None,
                     encoder_hidden_states,
                     None,
-                    timestep,
+                    emb,
                     cross_attention_kwargs,
-                    protein_labels,
-                    cell_line_labels
                     **ckpt_kwargs,
                 )
             else:
@@ -270,15 +238,12 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
                     attention_mask=None,
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=None,
-                    timestep=timestep,
+                    embedding=emb,
                     cross_attention_kwargs=cross_attention_kwargs,
-                    #class_labels=class_labels,
-                    protein_labels=protein_labels,
-                    cell_line_labels=cell_line_labels,
                 )
 
         # 3. Output
-        conditioning = self.transformer_blocks[0].norm1.get_emb(timestep, protein_labels, cell_line_labels, hidden_dtype=hidden_states.dtype)
+        conditioning = emb.to(hidden_states.dtype)
         shift, scale = self.proj_out_1(F.silu(conditioning)).chunk(2, dim=1)
         hidden_states = self.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
         hidden_states = self.proj_out_2(hidden_states)
@@ -294,7 +259,7 @@ class DiTTransformer2DModelWithCrossAttention(ModelMixin, ConfigMixin):
         )
 
         # 4.output
-        output = self.conv_up(output)
+        # output = self.conv_up(output)
 
         if not return_dict:
             return (output,)
@@ -309,10 +274,10 @@ def create_dit_model(config=None, resolution=32):
                 # attention_head_dim = 72,
 
                 num_attention_heads = 16,
-                attention_head_dim = 72,
-                in_channels = 4,
-                out_channels = 8,
-                num_layers = 28,
+                attention_head_dim = 64,
+                in_channels = 32,
+                out_channels = 16,
+                num_layers = 24,
                 dropout = 0.0,
                 norm_num_groups = 32,
                 attention_bias = True,

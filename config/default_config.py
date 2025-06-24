@@ -191,7 +191,7 @@ def parse_args():
     parser.add_argument(
         "--ema_max_decay", 
         type=float, 
-        default=0.999, 
+        default=0.9995, 
         help="The maximum decay magnitude for EMA."
     )
     

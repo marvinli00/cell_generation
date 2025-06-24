@@ -18,6 +18,9 @@ def edm_precondition(sigma, sigma_data=0.5):
     c_noise = sigma.log() / 4
     
     return c_skip, c_out, c_in, c_noise
+
+
+
 def edm_clean_image_to_model_input(x_noisy, sigma):
     """
     Precondition the input x_clean based on noise level sigma and noise.
@@ -55,6 +58,8 @@ def edm_model_output_to_x_0_hat(x_noisy, sigma, model_output):
     
     return x_0_hat
 
+
+
 def edm_loss_weight(sigma, sigma_data=0.5):
     """
     Calculate the importance sampling weight for EDM loss.
@@ -71,6 +76,8 @@ def edm_loss_weight(sigma, sigma_data=0.5):
     weight = (sigma**2 + sigma_data**2) / (sigma * sigma_data)**2
     # Normalize weights to prevent numerical issues
     return weight # / weight.mean()
+
+
 
 def get_noise_weight(timesteps, schedule_type, max_weight, min_weight, num_timesteps, sigmas=None):
     """
@@ -111,6 +118,8 @@ def get_noise_weight(timesteps, schedule_type, max_weight, min_weight, num_times
         
     return weights.to(timesteps.device)
 
+
+
 def prepare_latent_sample(vae, images, weight_dtype):
     """
     Encode images to latent space using VAE.
@@ -135,6 +144,8 @@ def prepare_latent_sample(vae, images, weight_dtype):
         
     return latents
 
+
+
 def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dropout_prob=1, weight_dtype=torch.float32, encoder_hidden_states=None):
     """
     Prepare model inputs including class labels with dropout.
@@ -151,11 +162,12 @@ def prepare_model_inputs(gt_latents, cond_latents, cell_line, protein_label, dro
         tuple: (clean_images, total_label)
     """
     # Concatenate latents along the channel dimension
-    clean_images = torch.cat([gt_latents, cond_latents], dim=1).to(weight_dtype) / 4
+    #clean_images = torch.cat([gt_latents, cond_latents], dim=1).to(weight_dtype) / 4
 
     #Do Not USE cond_latents as input for now
     clean_images = gt_latents.to(weight_dtype) / 4
-    cond_latents = gt_latents.to(weight_dtype) / 4
+    cond_latents = cond_latents.to(weight_dtype) / 4
+
     # Create dropout mask
     dropout_mask = torch.rand(protein_label.shape, dtype=weight_dtype, device=clean_images.device) > dropout_prob
     

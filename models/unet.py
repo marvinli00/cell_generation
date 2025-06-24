@@ -11,7 +11,7 @@ from diffusers.configuration_utils import register_to_config
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.transformers.dit_transformer_2d import DiTTransformer2DModel
-
+import timm
 
 class CustomUNetWithEmbeddings(UNet2DConditionModel):
     @register_to_config
@@ -92,7 +92,29 @@ class CustomUNetWithEmbeddings(UNet2DConditionModel):
         )
 
 
+class LocationClassifier(nn.Module):
+    def __init__(self, num_classes, pretrained=True, model_type='vit_small_patch16_224'):
+        super().__init__()
+        
+        self.model_type = model_type
+        
+        # Load pretrained ViT from timm
+        self.vit = timm.create_model(
+            model_type, 
+            pretrained=pretrained, 
+            num_classes=num_classes,
+            in_chans=16  # timm supports direct specification of input channels
+        )
+        
+        # Model expects 224x224 input, so add an adapter for 32x32
+        self.resize = nn.Upsample(size=(224, 224), mode='bilinear', align_corners=False)
 
+    def forward(self, x):
+        # Input shape: [batch_size, 32, 32, 32]
+        x = self.resize(x)  # Resize to [batch_size, 32, 224, 224]
+        x1 = self.vit(x)
+        return x1
+    
 
 def create_unet_model(config=None, resolution=32):
     """
@@ -202,7 +224,7 @@ def load_classifier(checkpoint_path, accelerator, weight_dtype):
     Returns:
         classifier: The loaded classifier model.
     """
-    from .location_classifier import LocationClassifier
+    # from .location_classifier import LocationClassifier
     
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     config = checkpoint['config']

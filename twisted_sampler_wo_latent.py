@@ -15,21 +15,69 @@ import tqdm
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from pathlib import Path
-
+from tifffile import imread
 
 # Import project modules
-from models.unet import create_unet_model, load_vae, load_classifier, load_clip_model, CustomUNetWithEmbeddings
+from models.unet import create_unet_model, load_vae
 from schedulers.edm_scheduler import create_edm_scheduler
 from utils.edm_utils import edm_clean_image_to_model_input, edm_model_output_to_x_0_hat
 from config.default_config import EDM_CONFIG
-from models.clip_image_encoder import OpenCLIPVisionEncoder
-from data.dataset import FullFieldDataset
 from models.dit import create_dit_model, DiTTransformer2DModelWithCrossAttention
 
+import pickle
+import torch.nn as nn
+import torch.nn.functional as F
+import timm
 
+class LocationClassifier(nn.Module):
+    def __init__(self, num_classes, pretrained=True, model_type='vit_small_patch16_224'):
+        super().__init__()
+        
+        self.model_type = model_type
+        
+        # Load pretrained ViT from timm
+        self.vit = timm.create_model(
+            model_type, 
+            pretrained=pretrained, 
+            num_classes=num_classes,
+            in_chans=3  # timm supports direct specification of input channels
+        )
 
+    def forward(self, x):
+        x = F.interpolate(x, (224, 224), mode='bilinear')
+        x1 = self.vit(x)
+        return x1
 
-
+def load_classifier(checkpoint_path, accelerator, weight_dtype):
+    """
+    Load a pre-trained classifier model.
+    
+    Args:
+        checkpoint_path: Path to the classifier checkpoint.
+        accelerator: Accelerator instance.
+        weight_dtype: Data type for weights.
+        
+    Returns:
+        classifier: The loaded classifier model.
+    """
+    # from .location_classifier import LocationClassifier
+    
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    config = checkpoint['config']
+    
+    classifier = LocationClassifier(
+        num_classes=config['num_classes'],
+        pretrained=False,
+        model_type=config['model_type']
+    )
+    
+    classifier.load_state_dict(checkpoint['model_state_dict'])
+    classifier.eval()
+    classifier.to(accelerator.device)
+    classifier.to(weight_dtype)
+    classifier.requires_grad_(False)
+    
+    return classifier
 
 def compute_ess(w, dim=0):
     ess = (w.sum(dim=dim))**2 / torch.sum(w**2, dim=dim)
@@ -148,15 +196,14 @@ def prepare_model_inputs(gt_images_latent, cond_images_latent, cell_line, label,
 
 def decode_latents(vae, latents, scaling_factor=4.0):
     """Decode latent samples to images using VAE"""
-    with torch.no_grad():
-        # Scale latents
-        latents = latents * 4 / vae.scaling_factor
-        
-        # Decode the latents to images
-        images = vae.decode(latents).sample
-        
-        # Normalize images to [0, 1] range
-        images = (images / 2 + 0.5).clamp(0, 1)
+    # Scale latents
+    latents = latents * 4 / vae.scaling_factor
+    
+    # Decode the latents to images
+    images = vae.decode(latents).sample
+    
+    # Normalize images to [0, 1] range
+    images = (images / 2 + 0.5).clamp(0, 1)
         
     return images
 
@@ -168,7 +215,7 @@ def prepare_conditioning(clip_image=None, cell_line=None, label=None, batch_size
     # Process CLIP image if provided
     if clip_image is not None:
         with torch.no_grad():
-            encoder_hidden_states = clip_model(clip_image)
+            encoder_hidden_states = None
     else:
         # Create empty encoder hidden states
         encoder_hidden_states = torch.zeros((batch_size, 196, 768), device=device, dtype=weight_dtype)
@@ -265,7 +312,8 @@ def get_log_probs(logits, true_labels, pred_labels=None):
 def twisting_classifier(x_0_hat_scaled_to_vae, y_true, reference_channels_for_classifier, classifier, sigma_dt, number_of_particles):
     normalized_variance = get_xstart_var(sigma_dt, var_type = 6, tausq_ = 0.012)
     
-    classifier_input = torch.cat([x_0_hat_scaled_to_vae.to(weight_dtype), reference_channels_for_classifier], dim=1)
+    # classifier_input = torch.cat([x_0_hat_scaled_to_vae.to(weight_dtype), reference_channels_for_classifier], dim=1)
+    classifier_input = x_0_hat_scaled_to_vae.to(weight_dtype)
     x_logit = classifier(classifier_input)
     
     return get_log_probs(x_logit, y_true)["true_log_probs"]
@@ -312,17 +360,17 @@ def sample_edm(
     # Each sample's conditioning is repeated number_of_particles times
     protein_labels_expanded = []
     cell_line_labels_expanded = []
-    encoder_hidden_states_expanded = []
+    # encoder_hidden_states_expanded = []
     
     for i in range(effective_batch_size):
         # Repeat each sample's labels for all its particles
         protein_labels_expanded.append(protein_labels[i:i+1].repeat(number_of_particles))
         cell_line_labels_expanded.append(cell_line_labels[i:i+1].repeat(number_of_particles))
-        encoder_hidden_states_expanded.append(encoder_hidden_states[i:i+1].repeat(number_of_particles, 1, 1))
+        # encoder_hidden_states_expanded.append(None.repeat(number_of_particles, 1, 1))
     
     protein_labels = torch.cat(protein_labels_expanded, dim=0)
     cell_line_labels = torch.cat(cell_line_labels_expanded, dim=0)
-    encoder_hidden_states = torch.cat(encoder_hidden_states_expanded, dim=0)
+    # encoder_hidden_states = torch.cat(encoder_hidden_states_expanded, dim=0)
     
 
 
@@ -387,13 +435,13 @@ def sample_edm(
             eps = noise * s_noise
             latents = latents + eps * (sigma_hat**2 - sigma**2) ** 0.5
         
-        latents = latents.double()
+        latents = latents.to(dtype=weight_dtype)
         latents = latents.detach()
 
         latents.requires_grad = True
         # Combine latents with condition latent
         combined_latent = latents
-        wandb.log({"latents": latents.max()}, step=i)
+        wandb.log({"latents": latents.max()})
         # Prepare input with noise according to EDM formulation
         model_input, timestep_input = edm_clean_image_to_model_input(combined_latent, sigma_hat_view)
         timestep_input = timestep_input.squeeze()
@@ -405,27 +453,28 @@ def sample_edm(
         model_input = model_input.to(weight_dtype)
         timestep_input = timestep_input.to(weight_dtype)
         
-        if encoder_hidden_states is not None:
-            encoder_hidden_states = encoder_hidden_states.to(weight_dtype)
+        # if encoder_hidden_states is not None:
+        #     encoder_hidden_states = encoder_hidden_states.to(weight_dtype)
         
         if len(timestep_input.shape) == 0:
             timestep_input = timestep_input.reshape(-1)
             timestep_input = timestep_input.repeat(total_batch_size)
 
         #concatenate model_input and cond_images_latent
-        model_input = torch.cat([model_input, reference_channels_for_classifier], dim=1)
+        model_input = torch.cat([model_input, reference_channels_for_classifier], dim=1).to(weight_dtype)
 
         #enable unconditioinal sample
         if unconditinal_sample:
             cell_line_labels = torch.zeros(cell_line_labels.shape, device=device, dtype=weight_dtype)
             protein_labels = torch.zeros(protein_labels.shape, device=device, dtype=weight_dtype)
 
+        # print("dtype of model", model.dtype, "dtype of model_input:", model_input.dtype, "timestep_input:", timestep_input.dtype, "protein_labels:", protein_labels.dtype, "cell_line_labels:", cell_line_labels.dtype)
         model_output = model(
             model_input,
             timestep_input,
             protein_labels=protein_labels,
             cell_line_labels=cell_line_labels,
-            encoder_hidden_states=encoder_hidden_states,
+            encoder_hidden_states=None,
         ).sample
     
         # Convert model output to denoised latent (x0 prediction)
@@ -437,8 +486,11 @@ def sample_edm(
         
         if classifier is not None:
             untwisted_predicted_x_start = untwisted_predicted_x_start.to(weight_dtype)
+            # decode
+            generated_images_gt = decode_latents(vae, untwisted_predicted_x_start[:,:16,:,:].to(weight_dtype))
+
             # x_0_hat_scaled_to_vae = untwisted_predicted_x_start*4/vae.scaling_factor
-            log_prob_classifier = twisting_classifier(untwisted_predicted_x_start, protein_labels, reference_channels_for_classifier, classifier, step_sigma, number_of_particles)
+            log_prob_classifier = twisting_classifier(generated_images_gt, protein_labels, reference_channels_for_classifier, classifier, step_sigma, number_of_particles)
             
             # Log metrics for each sample separately
             for sample_idx in range(effective_batch_size):
@@ -446,13 +498,13 @@ def sample_edm(
                 end_idx = start_idx + number_of_particles
                 sample_log_prob = log_prob_classifier[start_idx:end_idx]
                 most_likely_index = torch.argmax(sample_log_prob, dim=0)
-                wandb.log({f"log_prob_classifier_sample_{sample_idx}": sample_log_prob.mean()}, step=i)
-                wandb.log({f"most_likely_index_sample_{sample_idx}": most_likely_index}, step=i)
+                wandb.log({f"log_prob_classifier_sample_{sample_idx}": sample_log_prob.mean()})
+                wandb.log({f"most_likely_index_sample_{sample_idx}": most_likely_index})
             
         log_prob_classifier = log_prob_classifier.squeeze()
         log_prob = log_prob_classifier
         
-        grad_pk_with_respect_to_x_t = torch.autograd.grad(log_prob.mean(), combined_latent)[0] * 2 # factor
+        grad_pk_with_respect_to_x_t = torch.autograd.grad(log_prob.mean(), combined_latent)[0]  # factor
         #rescale mean back to the original scale
         grad_pk_with_respect_to_x_t = grad_pk_with_respect_to_x_t*combined_latent.shape[0]
 
@@ -509,7 +561,7 @@ def sample_edm(
                 
                 # Calculate ESS for this sample
                 ess = compute_ess_from_log_w(sample_log_w_accumulated)
-                wandb.log({f"ess_sample_{sample_idx}": ess}, step=i)
+                wandb.log({f"ess_sample_{sample_idx}": ess})
                 ess_tracker.append(ess.detach().cpu().numpy())
                 
                 # Resample if ESS is too low
@@ -555,10 +607,62 @@ def sample_edm(
     return latents_reshaped, most_likely_indices
 
 
-###################################################################################################################################################################
+def create_batch_from_csv(df, start_idx, batch_size, label_dict, cell_line_dict):
+    """Create a batch from CSV data starting at start_idx"""
+    end_idx = min(start_idx + batch_size, len(df))
+    batch_df = df.iloc[start_idx:end_idx]
+    
+    batch = {
+        'cond_image': [],
+        'gt_image': [],  # You might not have ground truth for new data
+        'label': [],
+        'cell_line': [],
+        'protein_name': [],
+        'cell_line_name': [],
+        'image_paths': []
+    }
+    
+    for _, row in batch_df.iterrows():
+        image_path = row['image_path']
+        try:
+            img = torch.from_numpy(imread(image_path))
+        except:
+            continue
 
-""" Main function to run the sampling process"""
+        image_path = image_path.split('/')[-1]  # Get the filename from the path
+        gt_img = img[:, :, [1]]
+        cond_img = img[:, :, [0, 2, 3]]
 
+        # move to channel first
+        gt_img = torch.permute(gt_img, (2, 0, 1))
+        cond_img = torch.permute(cond_img, (2, 0, 1))
+        img = torch.permute(img, (2, 0, 1))
+
+        cell_line = image_path.split('_')[0]
+        ab = image_path.split('_')[1]
+
+        
+            
+        # Add to batch
+        batch['cond_image'].append(cond_img)
+        batch['gt_image'].append(gt_img)  # Use same image as GT for now
+        batch['label'].append(label_dict[ab])
+        batch['cell_line'].append(cell_line_dict[cell_line])
+        batch['protein_name'].append(ab)  # Generate protein name from label
+        batch['cell_line_name'].append(cell_line)  # Generate cell line name
+        batch['image_paths'].append(image_path)
+    
+    # Convert lists to tensors
+    batch['cond_image'] = torch.stack(batch['cond_image'])
+    batch['gt_image'] = torch.stack(batch['gt_image'])
+    batch['label'] = torch.tensor(batch['label'])
+    batch['cell_line'] = torch.tensor(batch['cell_line'])
+
+    return batch
+
+
+###########################################################################################################################
+# --- Main function to run the sampling process --- #
 
 if __name__ == "__main__":
     # Set device
@@ -570,10 +674,12 @@ if __name__ == "__main__":
     weight_dtype = torch.float32  # Use float32 for compatibility with all operations
 
     # Define paths to models and checkpoints
-    model_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/latent_diffusion_edm/two_labels_latent_diffusion_edm_silu_cross_attention_2_bf16/checkpoint-285000/" 
+    model_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/latent_diffusion_edm/output_crossattn_L/checkpoint-355000/" 
     vae_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/stable-diffusion-3.5-large-turbo/vae"
-    classifier_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/checkpoints_classifier/model_epoch_16.pth"
-    clip_model_path = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+    classifier_path = "/scratch/groups/emmalu/marvinli/twisted_diffusion/latent_diffusion_edm/checkpoints_classifier/model_epoch_11.pth"
+    
+    # CSV file path
+    csv_file_path = "image_list.csv"  # Update this path to your CSV file
 
     # Set EDM parameters
     sigma_min = EDM_CONFIG["SIGMA_MIN"]
@@ -582,17 +688,13 @@ if __name__ == "__main__":
     rho = EDM_CONFIG["RHO"]
 
     # Set sampling parameters
-    num_inference_steps = 250
+    num_inference_steps = 400
     guidance_scale = 0  # Higher values increase adherence to the conditioning
-    batch_size = 1
-    image_size = 1  # Size of the generated images
     # Set the effective batch size
-    effective_batch_size = 2  # Process MULTIPLE samples simultaneously
-    number_of_particles = 16  # 16 particles per sample
+    effective_batch_size = 1  # Process MULTIPLE samples simultaneously
+    number_of_particles = 8  # 16 particles per sample
     unconditional_sample = False  # Whether to sample without conditioning
 
-
-    
     # Create model
     model = DiTTransformer2DModelWithCrossAttention.from_pretrained(model_path, subfolder="unet")
     model.to(device)
@@ -619,75 +721,47 @@ if __name__ == "__main__":
     # Move scheduler sigmas to device
     scheduler.sigmas = scheduler.sigmas.to(device)
 
-    # Load CLIP model (optional)
-    clip_model = load_clip_model(clip_model_path, dummy_accelerator, weight_dtype)
-
     # Load classifier (optional)
     classifier = load_classifier(classifier_path, dummy_accelerator, weight_dtype)
 
     print("Models loaded successfully")
 
+    # Load CSV file
+    df = pd.read_csv(csv_file_path)
+    print(f"Loaded {len(df)} samples from CSV")
 
-    test_dataset = FullFieldDataset(data_root='/scratch/groups/emmalu/multimodal_phenotyping/dataset/test/',
-                                    label_dict = "/scratch/groups/emmalu/multimodal_phenotyping/cell_line_map.pkl",
-                                    annotation_dict = "/scratch/groups/emmalu/multimodal_phenotyping/antibody_map.pkl",is_train=False)
-
-    # Get multiple batches of test data for effective_batch_size
-    def get_batch_data(dataloader, effective_batch_size):
-        """Helper function to collect multiple samples for batch processing"""
-        batches = []
-        dataloader_iter = iter(dataloader)
-        
-        for _ in range(effective_batch_size):
-            try:
-                batch = next(dataloader_iter)
-                batches.append(batch)
-            except StopIteration:
-                # If we run out of data, cycle back to the beginning
-                dataloader_iter = iter(dataloader)
-                batch = next(dataloader_iter)
-                batches.append(batch)
-        
-        # Combine batches
-        combined_batch = {}
-        for key in batches[0].keys():
-            if isinstance(batches[0][key], torch.Tensor):
-                combined_batch[key] = torch.cat([b[key] for b in batches], dim=0)
-            elif isinstance(batches[0][key], list):
-                combined_batch[key] = [item for b in batches for item in b[key]]
-            else:
-                combined_batch[key] = [b[key] for b in batches]
-        
-        return combined_batch
-
-
+    cell_line_dict = pickle.load(open("/scratch/groups/emmalu/multimodal_phenotyping/cell_line_map.pkl", "rb"))
+    label_dict = pickle.load(open("/scratch/groups/emmalu/multimodal_phenotyping/antibody_map.pkl", "rb"))
     
-    test_dataloader = torch.utils.data.DataLoader(
-        test_dataset, 
-        batch_size=1, 
-        shuffle=True,
-    )
+    # Expected CSV columns: 'image_path', 'label', 'cell_line'
+    # You may need to adjust these column names based on your CSV structure
+    required_columns = ['image_path']
+    for col in required_columns:
+        if col not in df.columns:
+            raise ValueError(f"Required column '{col}' not found in CSV. Available columns: {df.columns.tolist()}")
 
-    # Get a batch of test data
-    from tqdm import tqdm
-    clip_model.to(weight_dtype)
+
+    # Create output directory
+    os.makedirs("generated_images", exist_ok=True)
+
     count = 0
 
     protein_name_list = []
     cell_line_name_list = []
     
-    for batch_group in tqdm(range(0, len(test_dataset), effective_batch_size)):
-        # Get batch data for multiple samples
-        batch = get_batch_data(test_dataloader, effective_batch_size)
-        
+    # Process data in batches
+    for batch_start in tqdm(range(0, len(df), effective_batch_size), desc="Processing batches"):
+        # Create batch from CSV data
+        batch = create_batch_from_csv(df, batch_start, effective_batch_size, label_dict, cell_line_dict)
+    
+            
         # Show conditioning image
         cond_images = batch["cond_image"].to(weight_dtype).to(device)
-        clip_images = batch["clip_image"].to(weight_dtype).to(device)
         gt_images = batch["gt_image"].to(weight_dtype).to(device)
         
         # Encode conditioning image to latent space
         with torch.no_grad():
-            encoder_hidden_states = clip_model(clip_images)
+            encoder_hidden_states = None
             
         # Prepare cell_line and label conditioning
         cell_line = batch["cell_line"].to(device).long()
@@ -695,29 +769,29 @@ if __name__ == "__main__":
 
         protein_names = batch["protein_name"]
         cell_line_names = batch["cell_line_name"]
+        image_paths = batch["image_paths"]
         
         # Initialize wandb for this batch
-        wandb.init(project="Twisted Diffusion", name=f"Twisted Diffusion Batch {batch_group}")
-        wandb.log({"Protein labels": protein_names, "cell labels": cell_line_names})
+        wandb.init(project="Twisted Diffusion", name=f"Twisted Diffusion Batch {batch_start}")
+        # wandb.log({"Protein labels": protein_names, "cell labels": cell_line_names})
         
         # Add to tracking lists
         protein_name_list.extend(protein_names)
         cell_line_name_list.extend(cell_line_names)
         
-
         # Set random seed for reproducibility
         generator = torch.Generator(device=device).manual_seed(42)
         twisting_target = cond_images
         
         twisting_target = prepare_latent_sample(vae, twisting_target, weight_dtype)*vae.scaling_factor/4
-        reference_channels_for_classifier = vae.encode(cond_images).latent_dist.sample()*vae.scaling_factor/4
+        reference_channels_for_classifier = vae.encode(cond_images).latent_dist.sample().to(weight_dtype)*vae.scaling_factor/4
         
         # Sample from the model
         generated_latents, most_likely_indices = sample_edm(
             model=model,
             scheduler=scheduler,
             number_of_particles=number_of_particles,
-            effective_batch_size=effective_batch_size,  # NEW parameter
+            effective_batch_size=len(batch['cond_image']),  # Use actual batch size
             twisting_target=twisting_target,
             image_size=64,
             num_inference_steps=num_inference_steps,
@@ -740,15 +814,19 @@ if __name__ == "__main__":
             vae_type = vae.dtype
             vae.to(torch.float32)
             print(most_likely_indices)
+            
             # Process each sample in the batch
-            for sample_idx in range(effective_batch_size):
-                sample_latents = generated_latents[sample_idx].to(torch.float32)
-                generated_images_gt = decode_latents(vae, sample_latents[:,:16,:,:])
+            current_batch_size = len(batch['cond_image'])
+            for sample_idx in range(current_batch_size):
+                sample_latents = generated_latents[sample_idx].to(weight_dtype)
+
+                generated_images_gt = decode_latents(vae, sample_latents[:,:16,:,:].to(torch.float32))
                 
                 protein_name = protein_names[sample_idx]
                 cell_line_name = cell_line_names[sample_idx]
+                image_path = image_paths[sample_idx]
                 
-                print(f"Processing sample {sample_idx}: {cell_line_name}_{protein_name}")
+                print(f"Processing sample {sample_idx}: {cell_line_name}_{protein_name} from {image_path}")
                 
                 # Process all particles for this sample
                 for i in range(sample_latents.shape[0]):
@@ -756,12 +834,12 @@ if __name__ == "__main__":
                     # average across dim 0 (channels)
                     synthetic_image = synthetic_image.mean(dim=0, keepdim=True)
 
-                    # Save images for the first particle and best particle
+                    # Save images for the best particle
                     if i == most_likely_indices[sample_idx]:
                         suffix = "best"
                         
                         # Fix: Use single index instead of slice to get 3D tensor, then add batch dim
-                        cond_image_single = cond_images[sample_idx].cpu().numpy()  # Shape: [3, 256, 256]
+                        cond_image_single = cond_images[sample_idx].to(torch.float32).cpu().numpy()  # Shape: [3, 256, 256]
                         cond_image_single += 1
                         cond_image_single /= 2
                         synthetic_image_np = synthetic_image.numpy()  # Shape: [1, 256, 256]
@@ -769,45 +847,26 @@ if __name__ == "__main__":
                         synthetic_stack = np.concatenate([synthetic_image_np, cond_image_single], axis=0)
                         synthetic_stack = synthetic_stack[[1, 0, 2, 3], :, :]
                         synthetic_stack = np.moveaxis(synthetic_stack, 0, -1)
-                        imwrite(
-                            f"generated_images/{cell_line_name}_{protein_name}_pred_{suffix}_sample_{sample_idx}.tif",
-                            synthetic_stack,
-                        )
                         
-
-                        # Fix: Same issue with real_stack
-                        gt_image_single = gt_images[sample_idx].cpu().numpy()  # Shape: [1, 256, 256]
+                        # Create filename based on original image path
+                        base_name = os.path.splitext(os.path.basename(image_path))[0]
+                        output_filename = f"generated_images/{base_name}_{cell_line_name}_{protein_name}_pred_{suffix}_sample_{sample_idx}.tif"
+                        imwrite(output_filename, synthetic_stack)
+                        
+                        # Save ground truth comparison
+                        gt_image_single = gt_images[sample_idx].to(torch.float32).cpu().numpy()  # Shape: [1, 256, 256]
                         gt_image_single += 1
                         gt_image_single /= 2
                         real_stack = np.concatenate([gt_image_single, cond_image_single], axis=0)
                         
                         real_stack = real_stack[[1, 0, 2, 3], :, :]
                         real_stack = np.moveaxis(real_stack, 0, -1)
-                        imwrite(
-                            f"generated_images/{cell_line_name}_{protein_name}_real_sample_{sample_idx}.tif",
-                            real_stack,
-                        )
-                        
-
-                    # # Visualize comparison for the best particle
-                    # if i == most_likely_indices[sample_idx]:
-                    #     real_image = gt_images[sample_idx].cpu().float() * 0.5 + 0.5
-                    #     print(f"Generated image {i} shape: {synthetic_image.shape}, Real image shape: {real_image.shape}")
-                    #     # combine them side by side, but leave some space in between
-                    #     combined_image = torch.cat([synthetic_image, real_image], dim=2)
-                    #     plot_images(combined_image, row_title=f"generated_images/Generated Ground Truth Image_sample_{sample_idx}_particle_{i}")
+                        real_output_filename = f"generated_images/{base_name}_{cell_line_name}_{protein_name}_real_sample_{sample_idx}.tif"
+                        imwrite(real_output_filename, real_stack)
             
             vae.to(vae_type)
         
         # wandb.finish()
-        
-        # Break after first batch group for testing (remove this to process all data)
-        # break
 
-    data = {
-        "protein_name": protein_name_list,
-        "cell_line_name": cell_line_name_list
-    }
-
-    df = pd.DataFrame(data)
-    df.to_csv("protein_cell_line_names.csv", index=False)
+    print(f"Processing complete. Results saved to protein_cell_line_names.csv")
+    print(f"Generated images saved to generated_images/ directory")
